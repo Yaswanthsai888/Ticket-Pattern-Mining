@@ -1,0 +1,10 @@
+pandas
+openpyxl
+pyarrow
+spacy
+sentence-transformers
+scikit-learn>=1.3.0
+streamlit
+plotly
+groq
+python-dotenv
