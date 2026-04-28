@@ -58,6 +58,8 @@ def run_metrics(input_file, catalog_file, pivot_file):
             'Reduction_Rate': round(reduction_rate, 3) if pd.notna(reduction_rate) else np.nan,
             'Impact_Legacy': round(impact_legacy, 1),
             'Impact_DBB': round(impact_dbb, 1),
+            'AvgTTR_Legacy_Hours': round(avg_ttr_legacy, 1) if pd.notna(avg_ttr_legacy) else np.nan,
+            'AvgTTR_DBB_Hours': round(avg_ttr_dbb, 1) if pd.notna(avg_ttr_dbb) else np.nan,
             'AvgTTR_Delta_Hours': round(ttr_delta, 1) if pd.notna(ttr_delta) else np.nan,
             'ReopenRate_Delta': round(reopen_delta, 3) if pd.notna(reopen_delta) else np.nan,
             'PostMigrationNoiseFlag': noise_flag
@@ -65,6 +67,18 @@ def run_metrics(input_file, catalog_file, pivot_file):
         
     metrics_df = pd.DataFrame(metrics)
     
+    # Refresh metric columns on reruns so the catalog does not accumulate _x/_y duplicates.
+    metric_columns = [c for c in metrics_df.columns if c != 'Cluster_ID']
+    metric_prefixes = tuple(metric_columns)
+    stale_metric_columns = [
+        c for c in catalog.columns
+        if c in metric_columns
+        or c.endswith('_x')
+        or c.endswith('_y')
+        or c.rsplit('_', 1)[0] in metric_columns
+    ]
+    catalog = catalog.drop(columns=stale_metric_columns, errors='ignore')
+
     # Merge with catalog
     final_catalog = catalog.merge(metrics_df, on='Cluster_ID', how='left')
     

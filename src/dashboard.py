@@ -11,17 +11,14 @@ Directly maps to Use Case 5 requirements:
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
 import json
 import os
 import argparse
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from groq import Groq
-from dotenv import load_dotenv
+from rag_pipeline import load_embedder as load_rag_embedder
+from rag_pipeline import resolve_ticket
 
-load_dotenv()
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 # ── Page Config ──
 st.set_page_config(
@@ -32,12 +29,12 @@ st.set_page_config(
 
 # ── Args ──
 parser = argparse.ArgumentParser()
-parser.add_argument("--data_dir", default="data")
+parser.add_argument("--data_dir", default=DEFAULT_DATA_DIR)
 try:
     args, _ = parser.parse_known_args()
     base_dir = args.data_dir
 except Exception:
-    base_dir = "data"
+    base_dir = DEFAULT_DATA_DIR
 
 
 # ── Load Data ──
@@ -54,7 +51,7 @@ def load_data(base_dir):
 
 @st.cache_resource
 def load_embedder():
-    return SentenceTransformer('all-mpnet-base-v2')
+    return load_rag_embedder()
 
 def get_available_datasets(base_dir):
     datasets = []
@@ -64,6 +61,15 @@ def get_available_datasets(base_dir):
                 if os.path.exists(os.path.join(base_dir, d, "output", "cluster_catalog.csv")):
                     datasets.append(d)
     return sorted(datasets)
+
+
+def format_hours(hours):
+    if pd.isna(hours):
+        return "N/A"
+    if hours < 24:
+        return f"{hours:.1f}h"
+    days = hours / 24
+    return f"{days:.1f}d"
 
 # ── Sidebar ──
 st.sidebar.title("🔍 Ticket Pattern Mining")
@@ -348,6 +354,27 @@ with tab3:
 
     # Heatmap: Domain × Module
     st.subheader("Heatmap: Ticket Count by Domain × Module")
+    st.subheader("Mean Time To Resolve (MTTR)")
+    mttr_data = (
+        tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
+        .groupby("System_Type")["Time_to_Resolve"]
+        .agg(["mean", "median", "count"])
+        .reset_index()
+    )
+    if not mttr_data.empty:
+        c1, c2 = st.columns(2)
+        mttr_cols = {"Legacy": c1, "DBB": c2}
+        for _, row in mttr_data.iterrows():
+            col = mttr_cols.get(row["System_Type"])
+            if col is None:
+                continue
+            with col:
+                st.metric(
+                    f"{row['System_Type']} MTTR",
+                    format_hours(row["mean"]),
+                    f"Median {format_hours(row['median'])} across {int(row['count'])} resolved tickets",
+                )
+
     heatmap_data = tickets.pivot_table(
         values="Ticket_ID", index="Domain", columns="System_Type",
         aggfunc="count", fill_value=0,
@@ -408,6 +435,19 @@ with tab4:
             st.markdown(f"**🔍 Root Cause Analysis:** {analysis}")
         if pd.notna(rec) and rec:
             st.info(f"**💡 Prevention Strategy:** {rec}")
+
+        mttr_legacy = cluster_info.get("AvgTTR_Legacy_Hours", float("nan"))
+        mttr_dbb = cluster_info.get("AvgTTR_DBB_Hours", float("nan"))
+        mttr_delta = cluster_info.get("AvgTTR_Delta_Hours", float("nan"))
+
+        mttr_col1, mttr_col2, mttr_col3 = st.columns(3)
+        mttr_col1.metric("Legacy MTTR", format_hours(mttr_legacy))
+        mttr_col2.metric("DBB MTTR", format_hours(mttr_dbb))
+        mttr_col3.metric(
+            "MTTR Delta",
+            format_hours(abs(mttr_delta)) if pd.notna(mttr_delta) else "N/A",
+            "DBB slower" if pd.notna(mttr_delta) and mttr_delta > 0 else "DBB faster" if pd.notna(mttr_delta) and mttr_delta < 0 else "No comparison",
+        )
 
         st.divider()
 
@@ -513,62 +553,35 @@ with tab5:
 #  TAB 6 — Smart Resolution (RAG)
 # ════════════════════════════════════════════════════════════════
 with tab6:
-    st.header("🤖 Smart Resolution (RAG)")
+    st.header("Smart Resolution (RAG)")
     st.caption("Enter a new ticket description. The system will find similar historical tickets and suggest a resolution based on how they were solved.")
-    
-    new_ticket_text = st.text_area("New Ticket Description", height=150, placeholder="E.g., User unable to sync data on Glassrun app...")
-    
+
+    new_ticket_text = st.text_area(
+        "New Ticket Description",
+        height=150,
+        placeholder="E.g., User unable to sync data on Glassrun app...",
+    )
+
     if st.button("Get AI Resolution"):
         if not new_ticket_text.strip():
             st.warning("Please enter a ticket description.")
         else:
             with st.spinner("Analyzing and retrieving similar tickets..."):
-                embedder = load_embedder()
-                new_emb = embedder.encode([new_ticket_text])
-                
-                # Calculate similarity
-                embeddings = np.vstack(tickets['Embedding'].values)
-                sims = cosine_similarity(new_emb, embeddings)[0]
-                
-                # Get top 5 indices
-                top_indices = sims.argsort()[-5:][::-1]
-                similar_tickets = tickets.iloc[top_indices].copy()
-                similar_tickets['Similarity'] = sims[top_indices]
-                
-                # Prepare context for LLM
-                context_str = ""
-                for i, (_, row) in enumerate(similar_tickets.iterrows()):
-                    context_str += f"--- Ticket {i+1} (Similarity: {row['Similarity']:.2f}) ---\n"
-                    context_str += f"Description: {row.get('Short_Description', '')} {row.get('Description_Text', '')}\n"
-                    context_str += f"Resolution Notes: {row.get('Resolution_Notes', '')}\n\n"
-                    
-                prompt = f"""You are an expert IT support agent.
-                
-A new ticket has been submitted:
-"{new_ticket_text}"
-
-Here are the most similar historical tickets and how they were resolved:
-{context_str}
-
-Based ONLY on the historical resolution notes, provide a concise, step-by-step recommended solution for the new ticket.
-If the historical tickets do not contain a clear solution, state that human review is needed.
-"""
                 try:
-                    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-                    response = client.chat.completions.create(
-                        messages=[{"role": "user", "content": prompt}],
-                        model="llama-3.1-8b-instant",
-                        temperature=0.2,
-                        max_tokens=500
+                    embedder = load_embedder()
+                    recommendation, similar_tickets = resolve_ticket(
+                        ticket_text=new_ticket_text,
+                        tickets=tickets,
+                        embedder=embedder,
                     )
-                    st.subheader("💡 AI Recommended Resolution")
-                    st.write(response.choices[0].message.content)
-                    
+
+                    st.subheader("AI Recommended Resolution")
+                    st.write(recommendation)
+
                     st.divider()
-                    st.subheader("📚 Top Similar Historical Tickets")
+                    st.subheader("Top Similar Historical Tickets")
                     display_cols = ["Similarity", "Ticket_ID", "Short_Description", "Resolution_Notes"]
                     avail_cols = [c for c in display_cols if c in similar_tickets.columns]
                     st.dataframe(similar_tickets[avail_cols], hide_index=True)
-                    
                 except Exception as e:
-                    st.error(f"Error calling LLM: {e}")
+                    st.error(f"Error calling RAG pipeline: {e}")

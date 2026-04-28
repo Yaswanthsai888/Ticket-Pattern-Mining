@@ -35,13 +35,13 @@ graph TB
     end
 
     subgraph Output
-        I["Streamlit Dashboard<br/>5 Interactive Tabs"]
+        I["Streamlit Dashboard<br/>6 Interactive Tabs"]
     end
 
     A --> B --> C --> D --> E --> F --> G --> H --> I
 ```
 
-The pipeline is **7 sequential steps** orchestrated by [run_pipeline.py](file:///c:/Users/yaswa/OneDrive/Desktop/Projects/DBB%20VS%20Legacy/run_pipeline.py). Each step reads from the previous step's output and writes to the next. **Two steps** (05 and 06) make external LLM API calls via Groq.
+The pipeline is **7 sequential steps** orchestrated by [run_pipeline.py](file:///c:/Users/yaswa/OneDrive/Desktop/Projects/DBB%20VS%20Legacy/run_pipeline.py). Each step reads from the previous step's output and writes to the next. **Two steps** (05 and 06) make external LLM API calls through the IBM-hosted OpenAI-compatible gateway.
 
 ---
 
@@ -84,12 +84,12 @@ flowchart LR
 
     subgraph "05_llm_naming.py 🤖"
         F1["Assign 5 Strategic Personas"] --> F2["For EACH cluster:<br/>send keywords + 10 sample tickets"]
-        F2 --> F3["Groq LLM returns JSON:<br/>Name, Analysis, Recommendation"]
+        F2 --> F3["IBM/OpenAI-compatible gateway returns JSON:<br/>Name, Analysis, Recommendation"]
         F3 --> F4["Output: cluster_catalog.csv (updated)"]
     end
 
     subgraph "06_executive_summary.py 🤖"
-        G1["Compile full dataset stats:<br/>monthly trends, severity,<br/>domain splits, cluster analyses"] --> G2["Single Groq LLM call"]
+        G1["Compile full dataset stats:<br/>monthly trends, severity,<br/>domain splits, cluster analyses"] --> G2["Single gateway LLM call"]
         G2 --> G3["Returns JSON:<br/>narrative, findings, shift-left,<br/>verdict, domain health"]
         G3 --> G4["Output: executive_summary.json"]
     end
@@ -237,7 +237,7 @@ Also generates a **Domain × Module pivot table** with Legacy vs DBB ticket coun
 **Output**: `cluster_catalog.csv` (enriched with names)
 
 > [!IMPORTANT]
-> **This is LLM Call Point #1** — Makes one Groq API call per cluster (7 calls total for current dataset).
+> **This is LLM Call Point #1** — Makes one gateway LLM API call per selected cluster, capped at the top 15 clusters.
 
 **What it does:**
 
@@ -251,7 +251,7 @@ Also generates a **Domain × Module pivot table** with Legacy vs DBB ticket coun
    | **The New DBB Headache** | `Freq_Legacy = 0`, highest `Freq_DBB` | New problem created by DBB |
    | **The Legacy Anchor** | `Freq_DBB = 0`, highest `Freq_Legacy` | Problem that DBB successfully eliminated |
 
-2. **LLM Call** — For each cluster, sends to Groq:
+2. **LLM Call** — For each selected cluster, sends through the IBM/OpenAI-compatible gateway:
    - The cluster's `Primary_Domains` and `Top_Keywords`
    - 10 sample `Short_Description` values from actual tickets
    - Asks for a JSON response with:
@@ -259,9 +259,9 @@ Also generates a **Domain × Module pivot table** with Legacy vs DBB ticket coun
      - `Analysis`: 1-sentence root cause explanation
      - `Recommendation`: 1-sentence prevention/automation strategy
 
-**Model**: `llama-3.1-8b-instant` via Groq API
+**Default model**: `global/anthropic.claude-sonnet-4-5-20250929-v1:0` via the IBM OpenAI-compatible gateway
 **Temperature**: 0.3 (low creativity, high consistency)
-**Response format**: Enforced JSON mode
+**Response handling**: JSON is parsed from the returned text payload
 
 ---
 
@@ -271,7 +271,7 @@ Also generates a **Domain × Module pivot table** with Legacy vs DBB ticket coun
 **Output**: `data/output/executive_summary.json`
 
 > [!IMPORTANT]
-> **This is LLM Call Point #2** — Makes exactly **1 Groq API call** with the entire dataset context.
+> **This is LLM Call Point #2** — Makes exactly **1 gateway LLM API call** with the entire dataset context.
 
 **What it sends to the LLM:**
 - Total ticket counts (Legacy vs DBB)
@@ -323,7 +323,7 @@ Also generates a **Domain × Module pivot table** with Legacy vs DBB ticket coun
 
 ```mermaid
 flowchart TB
-    A["Pipeline Data<br/>(clusters, tickets, metrics)"] --> B["Step 05: LLM Naming<br/>🤖 7 API calls"]
+    A["Pipeline Data<br/>(clusters, tickets, metrics)"] --> B["Step 05: LLM Naming<br/>🤖 up to 15 API calls"]
     A --> C["Step 06: Executive Summary<br/>🤖 1 API call"]
     
     B --> D["cluster_catalog.csv<br/>+ Cluster_Name<br/>+ Analysis<br/>+ Recommendation"]
@@ -335,11 +335,11 @@ flowchart TB
 
 | LLM Call | Script | # of Calls | Model | What Goes In | What Comes Out |
 |----------|--------|-----------|-------|-------------|---------------|
-| **Cluster Naming** | `05_llm_naming.py` | 1 per cluster (7) | `llama-3.1-8b-instant` | Keywords + 10 sample tickets | Name, Root Cause, Recommendation |
-| **Executive Summary** | `06_executive_summary.py` | 1 total | `llama-3.1-8b-instant` | Full dataset statistics | Narrative, Findings, Shift-left, Verdict |
+| **Cluster Naming** | `05_llm_naming.py` | 1 per selected cluster (max 15) | `global/anthropic.claude-sonnet-4-5-20250929-v1:0` | Keywords + 10 sample tickets | Name, Root Cause, Recommendation |
+| **Executive Summary** | `06_executive_summary.py` | 1 total | `global/anthropic.claude-sonnet-4-5-20250929-v1:0` | Full dataset statistics | Narrative, Findings, Shift-left, Verdict |
 
-**Total API calls per pipeline run**: ~8 (7 clusters + 1 summary)
-**Estimated Groq token usage**: ~4,000 tokens per run
+**Total API calls per pipeline run**: `N + 1`, where `N = min(valid clusters, 15)`
+**Maximum API calls per pipeline run**: 16
 
 ---
 
@@ -361,7 +361,7 @@ flowchart TB
 ```
 
 > [!WARNING]
-> **Currently, running a new dataset OVERWRITES the files above.** The old data is lost. See [Running a New Dataset](#running-a-new-dataset) for how to handle this.
+> Each dataset run is stored under its own `data/<dataset_name>/...` folder, so previous runs are preserved as long as the input filenames are different.
 
 ---
 
@@ -389,11 +389,11 @@ flowchart TB
 | Criteria (Weight) | How We Score |
 |-------------------|-------------|
 | **Business Impact & Value (25%)** | Per-cluster Impact scores, Reduction Rate analysis, "Where DBB Failed" section |
-| **Innovation & AI Usage (20%)** | SentenceTransformer embeddings, HDBSCAN clustering, 2x LLM integration (Groq), Persona-based strategic selection |
+| **Innovation & AI Usage (20%)** | SentenceTransformer embeddings, HDBSCAN clustering, IBM/OpenAI-compatible LLM integration, priority-based cluster analysis, and RAG-assisted ticket resolution |
 | **Feasibility & Technical Soundness (20%)** | Fully working pipeline, Parquet persistence, modular architecture, error handling |
 | **Implementation Readiness (20%)** | Single command `run_pipeline.py`, `.env` config, works on any ITSM export |
 | **Scalability & Reusability (10%)** | Schema-agnostic column mapper, parameterized scripts, Parquet for large data |
-| **Presentation & Clarity (5%)** | 5-tab Streamlit dashboard, LLM-generated executive narrative, emoji-coded verdicts |
+| **Presentation & Clarity (5%)** | 6-tab Streamlit dashboard, LLM-generated executive narrative, emoji-coded verdicts |
 
 ---
 
@@ -403,21 +403,14 @@ flowchart TB
 ```bash
 .venv\Scripts\python.exe run_pipeline.py "path\to\new_dataset.xlsx"
 ```
-This **overwrites** all files in `data/processed/` and `data/output/`.
+This creates a dataset-specific folder such as `data/new_dataset/` with its own `processed/` and `output/` subfolders.
 
 ### To preserve old results
-Before running a new dataset, simply copy your current output:
-```bash
-# Save current results
-xcopy data\output data\output_indonesia /E /I
-xcopy data\processed data\processed_indonesia /E /I
-
-# Run new dataset
-.venv\Scripts\python.exe run_pipeline.py "path\to\malaysia_incidents.xlsx"
-```
+You can run multiple datasets without overwriting previous runs, as long as the input filenames are different because the output folder name is derived from the input file basename.
 
 ### Requirements
-- `.env` file with `GROQ_API_KEY=gsk_...`
+- `.env` file with `OPENAI_API_KEY=...`
+- Optional overrides: `OPENAI_BASE_URL` and `OPENAI_MODEL`
 - Virtual environment activated with all dependencies
 - ~10 minutes for vectorization (Step 02) on CPU
 - ~30 seconds for all other steps combined

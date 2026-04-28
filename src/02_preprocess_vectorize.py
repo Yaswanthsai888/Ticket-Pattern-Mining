@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import spacy
 import re
+import os
 from sentence_transformers import SentenceTransformer
 import sys
 import warnings
@@ -65,8 +66,14 @@ def preprocess_and_vectorize(input_file, output_file):
 
     # 2. Vectorization
     print("Loading SentenceTransformer model (all-mpnet-base-v2)...")
-    # This might download the model if first time
-    model = SentenceTransformer('all-mpnet-base-v2')
+    # Prefer the local cache first so the pipeline can run without network access.
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(key, None)
+
+    try:
+        model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
+    except Exception:
+        model = SentenceTransformer('all-mpnet-base-v2')
     
     print("Encoding texts to vectors (this may take a minute)...")
     texts_to_encode = df['Clean_Text'].tolist()
