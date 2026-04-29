@@ -6,6 +6,7 @@ __pycache__/
 
 # Generated datasets and pipeline outputs
 /data/
+/uploaded_datasets/
 
 # Keep the folder structure if needed
 !/data/.gitkeep

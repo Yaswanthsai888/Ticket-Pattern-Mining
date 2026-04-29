@@ -1,42 +1,95 @@
 import pandas as pd
 import numpy as np
 import sys
-import re
+
+from schema_mapper import ColumnRule, map_columns
 
 def map_dataset_columns(df):
-    col_mapping = {}
-    patterns = {
-        'Number': r'^(number|ticket.*id|incident.*id|id)$',
-        'Business service': r'^(business.*service|domain|app.*service)$',
-        'System_Subtype': r'^(system.*subtype)$',
-        'Impacted OpCo': r'^(impacted.*opco|opco|company|country|location)$',
-        'Created': r'^(created.*|opened.*|submitted.*date|date)$',
-        'Closed': r'^(closed.*|resolved.*date|completion.*date)$',
-        'Priority': r'^(priority|severity|urgency)$',
-        'Assignment group': r'^(assignment.*group|resolver.*group|assigned.*to.*group|team)$',
-        'Reopen count': r'^(reopen.*count|reopened|reopens)$',
-        'Description': r'^(description|details|issue)$',
-        'Short description': r'^(short.*description|title|summary|subject)$',
-        'Close notes': r'^(close.*notes|resolution|solution)$',
-        'Additional comments': r'^(additional.*comments|comments|work.*notes)$',
-        'System_Type': r'^(system.*type)$',
-        'Primary_System': r'^(primary.*system)$',
-        'label_confidence': r'^(label.*confidence)$',
-        'label_source': r'^(label.*source)$',
-        'post_migration_noise': r'^(post.*migration.*noise)$'
+    rules = {
+        'Number': ColumnRule(
+            aliases=('Number', 'Ticket ID', 'Incident ID', 'ID'),
+            regexes=(r'^(number|ticket id|incident id|id)$',),
+        ),
+        'Business service': ColumnRule(
+            aliases=('Business service', 'App service'),
+            regexes=(r'^(business service|app service)$',),
+            forbidden_aliases=('Domain', 'Domain Path', 'Business User', 'Business Impact', 'Business impact'),
+        ),
+        'System_Subtype': ColumnRule(
+            aliases=('System_Subtype',),
+            regexes=(r'^(system subtype)$',),
+        ),
+        'Impacted OpCo': ColumnRule(
+            aliases=('Impacted OpCo', 'OpCo', 'Company', 'Country', 'Location'),
+            regexes=(r'^(impacted opco|opco|company|country|location)$',),
+        ),
+        'Created': ColumnRule(
+            aliases=('Created', 'Opened', 'Submitted Date'),
+            regexes=(r'^(created|opened|submitted date|date)$',),
+            forbidden_contains=('created by', 'opened by', 'updated', 'vendor opened', 'last reopened'),
+            expected_type='datetime',
+        ),
+        'Closed': ColumnRule(
+            aliases=('Closed', 'Resolved', 'Completion Date'),
+            regexes=(r'^(closed|resolved|completion date)$',),
+            forbidden_contains=('closed by', 'vendor closed', 'resolved by'),
+            expected_type='datetime',
+        ),
+        'Priority': ColumnRule(
+            aliases=('Priority', 'Severity', 'Urgency', 'Original Priority'),
+            regexes=(r'^(priority|severity|urgency|original priority)$',),
+        ),
+        'Assignment group': ColumnRule(
+            aliases=('Assignment group', 'Resolver group', 'Assigned to group', 'Team'),
+            regexes=(r'^(assignment group|resolver group|assigned to group|team)$',),
+            forbidden_contains=('assigned to', 'support group', 'project support group'),
+        ),
+        'Reopen count': ColumnRule(
+            aliases=('Reopen count', 'Reopened', 'Reopens'),
+            regexes=(r'^(reopen count|reopened|reopens)$',),
+        ),
+        'Description': ColumnRule(
+            aliases=('Description', 'Details', 'Issue'),
+            regexes=(r'^(description|details|issue)$',),
+            forbidden_aliases=('Translated description',),
+        ),
+        'Short description': ColumnRule(
+            aliases=('Short description', 'Title', 'Summary', 'Subject'),
+            regexes=(r'^(short description|title|summary|subject)$',),
+            forbidden_aliases=('Translated Short description',),
+        ),
+        'Close notes': ColumnRule(
+            aliases=('Close notes', 'Resolution', 'Solution', 'Integrated Service Close Notes'),
+            regexes=(r'^(close notes|resolution|solution|integrated service close notes)$',),
+        ),
+        'Additional comments': ColumnRule(
+            aliases=('Additional comments', 'Comments and Work notes', 'Work notes', 'Comments'),
+            regexes=(r'^(additional comments|comments and work notes|work notes|comments)$',),
+            forbidden_aliases=('Comments for Knowledge Candidate',),
+        ),
+        'System_Type': ColumnRule(
+            aliases=('System_Type',),
+            regexes=(r'^(system type)$',),
+        ),
+        'Primary_System': ColumnRule(
+            aliases=('Primary_System',),
+            regexes=(r'^(primary system)$',),
+        ),
+        'label_confidence': ColumnRule(
+            aliases=('label_confidence',),
+            regexes=(r'^(label confidence)$',),
+        ),
+        'label_source': ColumnRule(
+            aliases=('label_source',),
+            regexes=(r'^(label source)$',),
+        ),
+        'post_migration_noise': ColumnRule(
+            aliases=('post_migration_noise',),
+            regexes=(r'^(post migration noise)$',),
+        ),
     }
-    for target_col, pattern in patterns.items():
-        for actual_col in df.columns:
-            if actual_col in col_mapping.values():
-                continue
-            if re.match(pattern, str(actual_col).lower().strip()):
-                col_mapping[target_col] = actual_col
-                break
-    for canonical, actual in col_mapping.items():
-        df[f'norm_{canonical}'] = df[actual]
-    for target_col in patterns.keys():
-        if f'norm_{target_col}' not in df.columns:
-            df[f'norm_{target_col}'] = np.nan
+    print("Column Mapping Results:")
+    df, _ = map_columns(df, rules, verbose=True)
     return df
 
 def ingest_and_normalize(input_file, output_file):

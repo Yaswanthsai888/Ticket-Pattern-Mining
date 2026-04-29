@@ -14,16 +14,28 @@ import plotly.express as px
 import json
 import os
 import argparse
+import subprocess
+import sys
 from rag_pipeline import load_embedder as load_rag_embedder
 from rag_pipeline import resolve_ticket
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+UPLOADS_DIR = os.path.join(PROJECT_ROOT, "uploaded_datasets")
+PIPELINE_STEPS = [
+    "00 Classification",
+    "01 Normalize",
+    "02 Vectorize",
+    "03 Clustering",
+    "04 Metrics",
+    "05 LLM Naming",
+    "06 Executive Summary",
+]
 
 # ── Page Config ──
 st.set_page_config(
-    page_title="Legacy vs DBB — Ticket Pattern Mining",
-    page_icon="🔍",
+    page_title="Legacy vs DBB - Ticket Pattern Mining",
+    page_icon=":mag:",
     layout="wide",
 )
 
@@ -71,9 +83,163 @@ def format_hours(hours):
     days = hours / 24
     return f"{days:.1f}d"
 
+
+def save_uploaded_file(uploaded_file):
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    file_path = os.path.join(UPLOADS_DIR, uploaded_file.name)
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return file_path
+
+
+def build_pipeline_command(input_file, mode):
+    return [
+        sys.executable,
+        os.path.join(PROJECT_ROOT, "run_pipeline.py"),
+        input_file,
+        "--output_dir",
+        DEFAULT_DATA_DIR,
+        "--mode",
+        mode,
+    ]
+
+
+def start_pipeline_for_upload(input_file, mode):
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    dataset_name = os.path.splitext(os.path.basename(input_file))[0]
+    log_path = os.path.join(UPLOADS_DIR, f"{dataset_name}.pipeline.log")
+    log_file = open(log_path, "w", encoding="utf-8")
+    cmd = [
+        *build_pipeline_command(input_file, mode),
+    ]
+    process = subprocess.Popen(
+        cmd,
+        cwd=PROJECT_ROOT,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_file.close()
+    return process, log_path, dataset_name
+
+
+def read_pipeline_log(log_path):
+    if not log_path or not os.path.exists(log_path):
+        return ""
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def pipeline_status():
+    run = st.session_state.get("pipeline_run")
+    if not run:
+        return None
+
+    process = run.get("process")
+    returncode = process.poll()
+    log = read_pipeline_log(run.get("log_path"))
+    completed = "Pipeline completed successfully." in log
+    failed = "Failed at step:" in log or (returncode is not None and returncode != 0)
+
+    current_step_idx = -1
+    for idx, step in enumerate(PIPELINE_STEPS):
+        if step in log:
+            current_step_idx = idx
+
+    if completed:
+        progress = 1.0
+        label = "Pipeline complete"
+    elif failed:
+        progress = max((current_step_idx + 1) / len(PIPELINE_STEPS), 0.05)
+        label = "Pipeline failed"
+    elif current_step_idx >= 0:
+        progress = min((current_step_idx + 0.35) / len(PIPELINE_STEPS), 0.98)
+        label = f"Running {PIPELINE_STEPS[current_step_idx]}"
+    else:
+        progress = 0.03
+        label = "Starting pipeline"
+
+    return {
+        **run,
+        "returncode": returncode,
+        "log": log,
+        "progress": progress,
+        "label": label,
+        "completed": completed,
+        "failed": failed,
+        "running": returncode is None,
+    }
+
+
+@st.fragment(run_every="2s")
+def render_pipeline_progress():
+    status = pipeline_status()
+    if not status:
+        return False
+
+    if status["completed"]:
+        st.success(f"Pipeline completed for {status['dataset_name']}. You can select it from the sidebar.")
+        st.progress(1.0, text="100% complete")
+        st.session_state["last_pipeline_log"] = status["log"]
+        st.session_state["selected_dataset"] = status["dataset_name"]
+        st.session_state["pipeline_done_message"] = f"Pipeline completed for {status['dataset_name']}."
+        st.session_state.pop("pipeline_run", None)
+        st.rerun(scope="app")
+        return False
+
+    if status["failed"]:
+        st.error(f"Pipeline failed for {status['dataset_name']}. Check the latest pipeline log in the sidebar.")
+        st.progress(status["progress"], text=f"{int(status['progress'] * 100)}% - failed")
+        st.session_state["last_pipeline_log"] = status["log"]
+        st.session_state["pipeline_done_message"] = f"Pipeline failed for {status['dataset_name']}."
+        st.session_state.pop("pipeline_run", None)
+        st.rerun(scope="app")
+        return False
+
+    st.info(f"Processing {status['dataset_name']} in the background. Existing datasets remain available below.")
+    st.progress(status["progress"], text=f"{int(status['progress'] * 100)}% - {status['label']}")
+    return True
+
+
+render_pipeline_progress()
+
+if st.session_state.get("pipeline_done_message"):
+    st.caption(st.session_state["pipeline_done_message"])
+
 # ── Sidebar ──
-st.sidebar.title("🔍 Ticket Pattern Mining")
+st.sidebar.title("Ticket Pattern Mining")
 st.sidebar.markdown("**Use Case 5**: Legacy vs DBB")
+
+st.sidebar.subheader("Run New Dataset")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Excel or CSV",
+    type=["xlsx", "xls", "csv"],
+)
+pipeline_mode = st.sidebar.selectbox("Pipeline Mode", ["POC", "PROD"])
+
+if st.sidebar.button("Run Pipeline From Upload", use_container_width=True):
+    if uploaded_file is None:
+        st.sidebar.warning("Please upload a dataset first.")
+    elif st.session_state.get("pipeline_run"):
+        st.sidebar.warning("A dataset is already being processed. Please wait for it to finish.")
+    else:
+        saved_file = save_uploaded_file(uploaded_file)
+        process, log_path, dataset_name = start_pipeline_for_upload(saved_file, pipeline_mode)
+        st.session_state["pipeline_run"] = {
+            "process": process,
+            "log_path": log_path,
+            "dataset_name": dataset_name,
+        }
+        st.session_state["last_pipeline_log"] = ""
+        st.session_state.pop("pipeline_done_message", None)
+        st.sidebar.success(f"Started pipeline for {dataset_name}.")
+        st.rerun()
+
+if st.session_state.get("last_pipeline_log"):
+    with st.sidebar.expander("Latest Pipeline Log", expanded=False):
+        st.text(st.session_state["last_pipeline_log"])
+
+st.sidebar.divider()
 
 datasets = get_available_datasets(base_dir)
 if not datasets:
@@ -84,7 +250,10 @@ if not datasets:
         st.error("No datasets found. Please run the pipeline first.")
         st.stop()
 
-selected_dataset = st.sidebar.selectbox("📂 Select Dataset", datasets)
+default_dataset = st.session_state.get("selected_dataset")
+default_index = datasets.index(default_dataset) if default_dataset in datasets else 0
+selected_dataset = st.sidebar.selectbox("Select Dataset", datasets, index=default_index)
+st.session_state["selected_dataset"] = selected_dataset
 if selected_dataset == "Default":
     dataset_dir = base_dir
 else:
@@ -116,16 +285,16 @@ st.sidebar.metric("Patterns Discovered", clusters_n)
 verdict = exec_summary.get("legacy_to_dbb_verdict", "")
 if verdict:
     color_map = {
-        "DBB_REDUCED_ISSUES": "🟢",
-        "DBB_INCREASED_ISSUES": "🔴",
-        "MIXED_RESULTS": "🟡",
-        "INSUFFICIENT_DATA": "⚪",
+        "DBB_REDUCED_ISSUES": "Green",
+        "DBB_INCREASED_ISSUES": "Red",
+        "MIXED_RESULTS": "Yellow",
+        "INSUFFICIENT_DATA": "Grey",
     }
-    icon = color_map.get(verdict, "⚪")
-    st.sidebar.markdown(f"### {icon} Verdict: {verdict.replace('_', ' ').title()}")
+    status_label = color_map.get(verdict, "Grey")
+    st.sidebar.markdown(f"### Verdict ({status_label}): {verdict.replace('_', ' ').title()}")
 
 st.sidebar.divider()
-st.sidebar.caption("Pipeline: classify → normalize → vectorize → cluster → metrics → LLM naming → summary")
+st.sidebar.caption("Pipeline: classify -> normalize -> vectorize -> cluster -> metrics -> LLM naming -> summary")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -133,12 +302,12 @@ st.sidebar.caption("Pipeline: classify → normalize → vectorize → cluster �
 # ════════════════════════════════════════════════════════════════
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📈 Migration Timeline",
-    "🔬 Pattern Discovery",
-    "🏢 Domain & Severity",
-    "🔎 Cluster Deep-Dive",
-    "🚀 Remediation Strategy",
-    "🤖 Smart Resolution (RAG)"
+    "Migration Timeline",
+    "Pattern Discovery",
+    "Domain & Severity",
+    "Cluster Deep-Dive",
+    "Remediation Strategy",
+    "Smart Resolution (RAG)",
 ])
 
 
@@ -204,11 +373,11 @@ with tab2:
     # Key Findings from LLM
     findings = exec_summary.get("key_findings", [])
     if findings:
-        st.subheader("🔑 Key Findings")
+        st.subheader("Key Findings")
         cols = st.columns(min(len(findings), 3))
         for i, f in enumerate(findings):
             with cols[i % 3]:
-                impact_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(f.get("impact", ""), "⚪")
+                impact_color = {"high": "High", "medium": "Medium", "low": "Low"}.get(f.get("impact", ""), "Unknown")
                 st.markdown(f"**{impact_color} {f.get('title', '')}**")
                 st.markdown(f"{f.get('detail', '')}")
         st.divider()
@@ -221,7 +390,8 @@ with tab2:
         analysis = row.get("Analysis", "")
         rec = row.get("Recommendation", "")
 
-        with st.expander(f"{'🛡️ ' + persona + ' — ' if pd.notna(persona) and persona else ''}Cluster {cid}: {name}", expanded=False):
+        persona_prefix = f"{persona} - " if pd.notna(persona) and persona else ""
+        with st.expander(f"{persona_prefix}Cluster {cid}: {name}", expanded=False):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Tickets", int(row["Size"]))
             c2.metric("Legacy", int(row["Frequency_Legacy"]))
@@ -230,19 +400,19 @@ with tab2:
             # Smart verdict
             fl, fd = int(row["Frequency_Legacy"]), int(row["Frequency_DBB"])
             if fl == 0 and fd > 0:
-                c4.metric("Trend", "🆕 New in DBB")
+                c4.metric("Trend", "New in DBB")
             elif fl > 0 and fd == 0:
-                c4.metric("Trend", "✅ Eliminated")
+                c4.metric("Trend", "Eliminated")
             elif fl > 0 and fd > 0:
                 change = ((fd - fl) / fl) * 100
                 c4.metric("Trend", f"{change:+.0f}%", delta=f"{change:+.0f}%", delta_color="inverse")
             else:
-                c4.metric("Trend", "—")
+                c4.metric("Trend", "-")
 
             if pd.notna(analysis) and analysis:
-                st.markdown(f"**🔍 Root Cause:** {analysis}")
+                st.markdown(f"**Root Cause:** {analysis}")
             if pd.notna(rec) and rec:
-                st.success(f"**💡 Recommendation:** {rec}")
+                st.success(f"**Recommendation:** {rec}")
 
             st.markdown(f"*Keywords: {row['Top_Keywords']}*")
 
@@ -262,7 +432,7 @@ with tab2:
                     fig = px.bar(
                         ct, x="YearMonth", y="Count", color="System_Type",
                         color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
-                        title=f"Volume Over Time — {name}",
+                        title=f"Volume Over Time - {name}",
                         barmode="group",
                     )
                     fig.update_layout(template="plotly_dark", height=300)
@@ -321,13 +491,12 @@ with tab3:
     if domain_health:
         st.subheader("Domain Health Scorecard (AI-Generated)")
         dh_df = pd.DataFrame(domain_health)
-        # Add emojis
         verdict_map = {
-            "improved": "✅ Improved",
-            "worsened": "🔴 Worsened",
-            "new_in_dbb": "🆕 New in DBB",
-            "legacy_only": "📦 Legacy Only",
-            "stable": "➡️ Stable",
+            "improved": "Improved",
+            "worsened": "Worsened",
+            "new_in_dbb": "New in DBB",
+            "legacy_only": "Legacy Only",
+            "stable": "Stable",
         }
         if "verdict" in dh_df.columns:
             dh_df["verdict"] = dh_df["verdict"].map(lambda v: verdict_map.get(v, v))
@@ -352,8 +521,62 @@ with tab3:
                 f"{int(row['Reopened_Tickets'])} of {int(row['Total_Tickets'])} tickets",
             )
 
-    # Heatmap: Domain × Module
-    st.subheader("Heatmap: Ticket Count by Domain × Module")
+    st.subheader("Repeat Defect / Reopened Ticket Drilldown")
+    reopened = tickets[
+        tickets["System_Type"].isin(["Legacy", "DBB"])
+        & tickets["Reopen_Flag"].fillna(False)
+    ].copy()
+    if reopened.empty:
+        st.info("No reopened tickets found in the selected dataset.")
+    else:
+        reopened_summary = (
+            reopened.groupby("Cluster_ID")
+            .agg(
+                Reopened_Tickets=("Ticket_ID", "count"),
+                Legacy_Reopened=("System_Type", lambda s: int((s == "Legacy").sum())),
+                DBB_Reopened=("System_Type", lambda s: int((s == "DBB").sum())),
+                Avg_Severity=("Severity", "mean"),
+                Avg_MTTR_Hours=("Time_to_Resolve", "mean"),
+            )
+            .reset_index()
+        )
+        cluster_sizes = tickets.groupby("Cluster_ID")["Ticket_ID"].count().rename("Cluster_Tickets")
+        reopened_summary = reopened_summary.merge(cluster_sizes, on="Cluster_ID", how="left")
+        reopened_summary["Reopen_Rate"] = reopened_summary["Reopened_Tickets"] / reopened_summary["Cluster_Tickets"]
+        cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
+        keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
+        reopened_summary["Pattern"] = reopened_summary["Cluster_ID"].map(cluster_names).fillna(reopened_summary["Cluster_ID"].map(keyword_names))
+        reopened_summary["Pattern"] = reopened_summary["Pattern"].fillna("Noise / Unclustered")
+        reopened_summary = reopened_summary.sort_values(["Reopened_Tickets", "Reopen_Rate"], ascending=False)
+
+        fig = px.bar(
+            reopened_summary.head(10),
+            x="Reopened_Tickets",
+            y="Pattern",
+            color="DBB_Reopened",
+            orientation="h",
+            title="Top Reopened Patterns",
+            color_continuous_scale="Reds",
+        )
+        fig.update_layout(template="plotly_dark", height=420, yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        display_reopen = reopened_summary[
+            ["Pattern", "Reopened_Tickets", "Legacy_Reopened", "DBB_Reopened", "Reopen_Rate", "Avg_Severity", "Avg_MTTR_Hours"]
+        ].copy()
+        display_reopen["Reopen_Rate"] = display_reopen["Reopen_Rate"].map(lambda v: f"{v:.1%}")
+        display_reopen["Avg_Severity"] = display_reopen["Avg_Severity"].round(2)
+        display_reopen["Avg_MTTR_Hours"] = display_reopen["Avg_MTTR_Hours"].round(1)
+        st.dataframe(display_reopen.head(15), hide_index=True)
+
+        reopened_cols = [
+            "Ticket_ID", "System_Type", "System_Subtype", "Domain", "OpCo",
+            "Short_Description", "Severity", "Reopen_Count", "Time_to_Resolve",
+        ]
+        reopened_cols = [c for c in reopened_cols if c in reopened.columns]
+        with st.expander("View reopened ticket details", expanded=False):
+            st.dataframe(reopened[reopened_cols].sort_values("Reopen_Count", ascending=False).head(100), hide_index=True)
+
     st.subheader("Mean Time To Resolve (MTTR)")
     mttr_data = (
         tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
@@ -390,6 +613,57 @@ with tab3:
         fig.update_layout(template="plotly_dark", height=500)
         st.plotly_chart(fig, use_container_width=True)
 
+    st.subheader("Same Failure Patterns Across OpCo / Country")
+    opco_pattern_tickets = tickets[
+        tickets["System_Type"].isin(["Legacy", "DBB"])
+        & (tickets["Cluster_ID"] != -1)
+        & tickets["OpCo"].notna()
+    ].copy()
+    if opco_pattern_tickets.empty:
+        st.info("No clustered OpCo/country data available for this dataset.")
+    else:
+        cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
+        keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
+        opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Cluster_ID"].map(cluster_names).fillna(
+            opco_pattern_tickets["Cluster_ID"].map(keyword_names)
+        )
+        opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Pattern"].fillna(
+            opco_pattern_tickets["Cluster_ID"].map(lambda cid: f"Cluster {cid}")
+        )
+        opco_heatmap = opco_pattern_tickets.pivot_table(
+            values="Ticket_ID",
+            index="Pattern",
+            columns="OpCo",
+            aggfunc="count",
+            fill_value=0,
+        )
+        top_patterns = opco_heatmap.sum(axis=1).sort_values(ascending=False).head(15).index
+        top_opcos = opco_heatmap.sum(axis=0).sort_values(ascending=False).head(12).index
+        opco_heatmap = opco_heatmap.loc[top_patterns, top_opcos]
+        fig = px.imshow(
+            opco_heatmap,
+            text_auto=True,
+            color_continuous_scale="YlOrRd",
+            title="Recurring Pattern Count by OpCo / Country",
+            aspect="auto",
+        )
+        fig.update_layout(template="plotly_dark", height=max(450, 28 * len(opco_heatmap)))
+        st.plotly_chart(fig, use_container_width=True)
+
+        opco_summary = (
+            opco_pattern_tickets.groupby(["Pattern", "OpCo", "System_Type"])
+            .size()
+            .unstack(fill_value=0)
+            .reset_index()
+        )
+        for col in ["Legacy", "DBB"]:
+            if col not in opco_summary.columns:
+                opco_summary[col] = 0
+        opco_summary["Total"] = opco_summary["Legacy"] + opco_summary["DBB"]
+        opco_summary = opco_summary.sort_values("Total", ascending=False)
+        with st.expander("View OpCo / country recurrence table", expanded=False):
+            st.dataframe(opco_summary[["Pattern", "OpCo", "Legacy", "DBB", "Total"]].head(100), hide_index=True)
+
 
 # ════════════════════════════════════════════════════════════════
 #  TAB 4 — Cluster Deep-Dive
@@ -424,7 +698,7 @@ with tab4:
         persona = cluster_info.get("Strategic_Persona", "")
 
         if pd.notna(persona) and persona:
-            st.markdown(f"### 🛡️ {persona}")
+            st.markdown(f"### {persona}")
         st.markdown(f"## {name}")
         st.caption(f"TF-IDF Keywords: {cluster_info['Top_Keywords']}")
         st.caption(f"Domains: {cluster_info['Primary_Domains']}")
@@ -432,9 +706,9 @@ with tab4:
         analysis = cluster_info.get("Analysis", "")
         rec = cluster_info.get("Recommendation", "")
         if pd.notna(analysis) and analysis:
-            st.markdown(f"**🔍 Root Cause Analysis:** {analysis}")
+            st.markdown(f"**Root Cause Analysis:** {analysis}")
         if pd.notna(rec) and rec:
-            st.info(f"**💡 Prevention Strategy:** {rec}")
+            st.info(f"**Prevention Strategy:** {rec}")
 
         mttr_legacy = cluster_info.get("AvgTTR_Legacy_Hours", float("nan"))
         mttr_dbb = cluster_info.get("AvgTTR_DBB_Hours", float("nan"))
@@ -463,7 +737,7 @@ with tab4:
             fig = px.bar(
                 ct, x="YearMonth", y="Count", color="System_Type",
                 color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
-                title=f"Ticket Volume Over Time — {name}",
+                title=f"Ticket Volume Over Time - {name}",
                 barmode="group",
             )
             fig.update_layout(template="plotly_dark", height=350)
@@ -480,7 +754,7 @@ with tab4:
 #  TAB 5 — Remediation Strategy
 # ════════════════════════════════════════════════════════════════
 with tab5:
-    st.header("🚀 Remediation & Volume Reduction Strategy")
+    st.header("Remediation & Volume Reduction Strategy")
     st.caption("Actionable recommendations to reduce future ticket volumes.")
 
     # Shift-left opportunities from LLM
@@ -495,8 +769,8 @@ with tab5:
                 c3.metric("Est. Reduction", opp.get("estimated_reduction", "?"))
             st.divider()
 
-    # Pattern → Root Cause → Prevention Map (from cluster catalog)
-    st.subheader("Pattern → Root Cause → Prevention Map")
+    # Pattern -> Root Cause -> Prevention Map (from cluster catalog)
+    st.subheader("Pattern -> Root Cause -> Prevention Map")
     map_data = []
     for _, row in valid_catalog.iterrows():
         name = row.get("Cluster_Name", row["Top_Keywords"])
@@ -515,38 +789,57 @@ with tab5:
     if map_data:
         st.dataframe(pd.DataFrame(map_data), hide_index=True)
 
-    # Clusters where DBB didn't help (pollutants)
-    st.subheader("⚠️ Where DBB Failed to Reduce Issues")
+    st.subheader("Legacy Patterns Reappeared in DBB")
     pollutants = valid_catalog[
         (valid_catalog["Frequency_Legacy"] > 0)
         & (valid_catalog["Frequency_DBB"] > 0)
     ].copy()
     if not pollutants.empty:
         pollutants["Change"] = ((pollutants["Frequency_DBB"] - pollutants["Frequency_Legacy"]) / pollutants["Frequency_Legacy"] * 100).round(0)
+        pollutants["DBB Share"] = (
+            pollutants["Frequency_DBB"]
+            / (pollutants["Frequency_Legacy"] + pollutants["Frequency_DBB"])
+        ).round(3)
         pollutants = pollutants.sort_values("Change", ascending=False)
+        st.caption("These are patterns that existed in Legacy and still appeared in DBB. Positive change means DBB has more tickets than Legacy for the same recurring pattern.")
+
+        pollution_rows = []
         for _, row in pollutants.iterrows():
             name = row.get("Cluster_Name", row["Top_Keywords"])
             change = row["Change"]
+            pollution_rows.append({
+                "Pattern": name,
+                "Legacy Tickets": int(row["Frequency_Legacy"]),
+                "DBB Tickets": int(row["Frequency_DBB"]),
+                "DBB Share": f"{row['DBB Share']:.1%}",
+                "Change vs Legacy": f"{change:+.0f}%",
+                "Root Cause": row.get("Analysis", ""),
+                "Prevention": row.get("Recommendation", ""),
+            })
             if change > 0:
-                st.error(f"📈 **{name}**: DBB tickets are **{change:.0f}% higher** than Legacy ({int(row['Frequency_Legacy'])} → {int(row['Frequency_DBB'])})")
+                st.error(f"**{name}**: Legacy pattern reappeared worse in DBB. DBB tickets are {change:.0f}% higher than Legacy ({int(row['Frequency_Legacy'])} -> {int(row['Frequency_DBB'])}).")
             else:
-                st.success(f"📉 **{name}**: DBB tickets are **{abs(change):.0f}% lower** than Legacy ({int(row['Frequency_Legacy'])} → {int(row['Frequency_DBB'])})")
+                st.warning(f"**{name}**: Legacy pattern still reappeared in DBB, but at {abs(change):.0f}% lower volume ({int(row['Frequency_Legacy'])} -> {int(row['Frequency_DBB'])}).")
+
+        st.dataframe(pd.DataFrame(pollution_rows), hide_index=True)
+    else:
+        st.success("No clustered Legacy patterns reappeared in DBB for this dataset.")
 
     # New DBB-only issues
     new_dbb = valid_catalog[valid_catalog["Frequency_Legacy"] == 0]
     if not new_dbb.empty:
-        st.subheader("🆕 Issues Introduced by DBB")
+        st.subheader("Issues Introduced by DBB")
         for _, row in new_dbb.iterrows():
             name = row.get("Cluster_Name", row["Top_Keywords"])
-            st.warning(f"**{name}**: {int(row['Frequency_DBB'])} tickets — this pattern didn't exist in Legacy.")
+            st.warning(f"**{name}**: {int(row['Frequency_DBB'])} tickets - this pattern did not exist in Legacy.")
 
     # Legacy issues eliminated
     eliminated = valid_catalog[valid_catalog["Frequency_DBB"] == 0]
     if not eliminated.empty:
-        st.subheader("✅ Legacy Issues Successfully Eliminated by DBB")
+        st.subheader("Legacy Issues Successfully Eliminated by DBB")
         for _, row in eliminated.iterrows():
             name = row.get("Cluster_Name", row["Top_Keywords"])
-            st.success(f"**{name}**: {int(row['Frequency_Legacy'])} Legacy tickets → 0 in DBB. This problem was solved.")
+            st.success(f"**{name}**: {int(row['Frequency_Legacy'])} Legacy tickets -> 0 in DBB. This problem was solved.")
 
 
 # ════════════════════════════════════════════════════════════════
