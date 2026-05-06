@@ -1,13 +1,3 @@
-"""
-dashboard.py — Legacy vs DBB Ticket Pattern Mining Dashboard
-=============================================================
-Directly maps to Use Case 5 requirements:
-  Tab 1  Migration Timeline          → "Distinguish Legacy vs DBB tickets"
-  Tab 2  Pattern Discovery           → "Identify repeating patterns"
-  Tab 3  Domain & Severity Analysis  → "Overlapping domains, modules"
-  Tab 4  Cluster Deep-Dive           → "Same issue manifesting differently"
-  Tab 5  Remediation Strategy        → "Shift-left, KB, automation"
-"""
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -16,6 +6,8 @@ import os
 import argparse
 import subprocess
 import sys
+import re
+from html import escape
 from rag_pipeline import load_embedder as load_rag_embedder
 from rag_pipeline import resolve_ticket
 
@@ -84,6 +76,397 @@ def format_hours(hours):
     return f"{days:.1f}d"
 
 
+def format_pct(value):
+    if pd.isna(value):
+        return "N/A"
+    return f"{value:.1%}"
+
+
+def inject_dashboard_styles():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --panel-bg: rgba(15, 23, 42, 0.72);
+            --panel-bg-soft: rgba(2, 6, 23, 0.42);
+            --panel-border: rgba(148, 163, 184, 0.18);
+            --text-strong: #f8fafc;
+            --text-body: #dbe7f5;
+            --text-muted: #94a3b8;
+            --accent-blue: #38bdf8;
+            --accent-green: #22c55e;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 28%),
+                radial-gradient(circle at top right, rgba(34, 197, 94, 0.06), transparent 24%),
+                linear-gradient(180deg, #020617 0%, #0f172a 45%, #111827 100%);
+        }
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+        h1, h2, h3 {
+            letter-spacing: 0;
+        }
+        [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+            background: rgba(15, 23, 42, 0.55);
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            padding: 0.35rem;
+        }
+        [data-baseweb="tab"] {
+            height: 42px;
+            border-radius: 8px;
+            padding: 0 16px;
+            color: var(--text-muted);
+            background: transparent;
+        }
+        [aria-selected="true"][data-baseweb="tab"] {
+            background: rgba(30, 41, 59, 0.95);
+            color: var(--text-strong);
+        }
+        [data-testid="stMetric"] {
+            background: var(--panel-bg-soft);
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            padding: 0.9rem 1rem;
+        }
+        [data-testid="stMetricLabel"] {
+            color: var(--text-muted);
+        }
+        [data-testid="stMetricValue"] {
+            color: var(--text-strong);
+        }
+        [data-testid="stMetricDelta"] {
+            color: #cbd5e1;
+        }
+        [data-testid="stDataFrame"], .stPlotlyChart {
+            background: rgba(2, 6, 23, 0.18);
+            border-radius: 10px;
+        }
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            overflow: hidden;
+            background: rgba(15, 23, 42, 0.38);
+        }
+        div[data-testid="stExpander"] details summary {
+            background: rgba(15, 23, 42, 0.62);
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(15,23,42,0.98) 0%, rgba(2,6,23,0.98) 100%);
+            border-right: 1px solid var(--panel-border);
+        }
+        .section-panel {
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            background: var(--panel-bg);
+            padding: 18px 20px;
+            margin: 10px 0 16px;
+        }
+        .section-panel-title {
+            color: var(--text-strong);
+            font-size: 1rem;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .section-panel-body {
+            color: var(--text-body);
+            line-height: 1.6;
+        }
+        .status-chip {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-weight: 700;
+            font-size: 0.82rem;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            border: 1px solid transparent;
+        }
+        .status-chip.info {
+            color: #bfdbfe;
+            background: rgba(59, 130, 246, 0.14);
+            border-color: rgba(59, 130, 246, 0.28);
+        }
+        .status-chip.good {
+            color: #bbf7d0;
+            background: rgba(34, 197, 94, 0.14);
+            border-color: rgba(34, 197, 94, 0.3);
+        }
+        .status-chip.warn {
+            color: #fde68a;
+            background: rgba(245, 158, 11, 0.14);
+            border-color: rgba(245, 158, 11, 0.3);
+        }
+        .status-chip.bad {
+            color: #fecaca;
+            background: rgba(239, 68, 68, 0.14);
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+        .insight-card {
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            background: var(--panel-bg);
+            padding: 18px 20px;
+            margin: 10px 0 16px;
+        }
+        .insight-card strong,
+        .mini-card strong {
+            color: var(--text-strong);
+        }
+        .insight-label {
+            color: #93c5fd;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        .insight-title {
+            color: var(--text-strong);
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .insight-body {
+            color: var(--text-body);
+            line-height: 1.65;
+        }
+        .insight-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 14px;
+            margin: 12px 0 18px;
+        }
+        .mini-card {
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            background: var(--panel-bg-soft);
+            padding: 15px 16px;
+            min-height: 100%;
+        }
+        .mini-card.root { border-left: 4px solid #38bdf8; }
+        .mini-card.action { border-left: 4px solid #22c55e; }
+        .mini-card.priority { border-left: 4px solid #f59e0b; }
+        .mini-card-title {
+            color: var(--text-strong);
+            font-size: 0.95rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .clean-list {
+            margin: 8px 0 0;
+            padding-left: 19px;
+            color: var(--text-body);
+            line-height: 1.55;
+        }
+        .clean-list li { margin: 5px 0; }
+        .priority-pill {
+            display: inline-block;
+            border-radius: 999px;
+            border: 1px solid rgba(245, 158, 11, 0.38);
+            background: rgba(245, 158, 11, 0.12);
+            color: #fde68a;
+            padding: 5px 10px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_panel(title, body, tone="info"):
+    tone_class = {
+        "info": "info",
+        "good": "good",
+        "warn": "warn",
+        "bad": "bad",
+    }.get(tone, "info")
+    st.markdown(
+        (
+            f'<div class="section-panel">'
+            f'<span class="status-chip {tone_class}">{escape(title)}</span>'
+            f'<div class="section-panel-body">{escape(body)}</div>'
+            f'</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def split_sentences(text, limit=None):
+    if not isinstance(text, str) or not text.strip():
+        return []
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    sentences = [s.strip() for s in sentences if s.strip()]
+    return sentences[:limit] if limit else sentences
+
+
+def numbered_items(text):
+    if not isinstance(text, str) or not text.strip():
+        return []
+    parts = re.split(r"\s*\(\d+\)\s*", text.strip())
+    return [p.strip(" .;") for p in parts[1:] if p.strip(" .;")]
+
+
+def section_between(text, start_label, end_labels):
+    if not isinstance(text, str):
+        return ""
+    lower_text = text.lower()
+    start = lower_text.find(start_label.lower())
+    if start == -1:
+        return ""
+    start += len(start_label)
+    end = len(text)
+    for label in end_labels:
+        idx = lower_text.find(label.lower(), start)
+        if idx != -1:
+            end = min(end, idx)
+    return text[start:end].strip(" :.-")
+
+
+def list_html(items):
+    if not items:
+        return ""
+    return "<ul class='clean-list'>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>"
+
+
+def render_executive_narrative(narrative):
+    paragraphs = [p.strip() for p in str(narrative).split("\n\n") if p.strip()]
+    if not paragraphs:
+        return
+
+    labels = ["Executive Readout", "Patterns Needing Attention", "Recommended Action"]
+    cards = []
+    for idx, paragraph in enumerate(paragraphs[:3]):
+        cards.append(
+            (
+                f'<div class="mini-card {"action" if idx == 2 else "root"}">'
+                f'<div class="mini-card-title">{escape(labels[idx] if idx < len(labels) else "Insight")}</div>'
+                f'<div class="insight-body">{escape(paragraph)}</div>'
+                f'</div>'
+            )
+        )
+    st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def render_cluster_spotlight_cards(rows):
+    cards = []
+    for _, row in rows.iterrows():
+        legacy = int(row.get("Frequency_Legacy", 0))
+        dbb = int(row.get("Frequency_DBB", 0))
+        cards.append(
+            (
+                f'<div class="mini-card root">'
+                f'<div class="mini-card-title">{escape(pattern_name(row))}</div>'
+                f'<div style="margin-bottom:8px">'
+                f'<span class="status-chip info">{int(row.get("Size", 0))} total tickets</span>'
+                f'<span class="status-chip {"warn" if dbb > legacy else "good" if legacy > 0 and dbb == 0 else "info"}">{escape(pattern_status(row))}</span>'
+                f'</div>'
+                f'<div class="insight-body">Legacy: {legacy} | DBB: {dbb} | Change: {escape(pattern_change_text(legacy, dbb))}</div>'
+                f'<div class="insight-body" style="margin-top:10px">Domains: {escape(str(row.get("Primary_Domains", "N/A")))}</div>'
+                f'</div>'
+            )
+        )
+    if cards:
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def render_pattern_insight(analysis, recommendation):
+    summary = ""
+    drivers = []
+    closing = ""
+    if isinstance(analysis, str) and analysis.strip():
+        cause_label = "Common root causes include:"
+        cause_idx = analysis.find(cause_label)
+        if cause_idx != -1:
+            summary = analysis[:cause_idx].strip()
+            cause_block = analysis[cause_idx + len(cause_label):]
+            repetitive_idx = cause_block.find("The repetitive nature")
+            if repetitive_idx != -1:
+                closing = cause_block[repetitive_idx:].strip()
+                cause_block = cause_block[:repetitive_idx]
+            drivers = numbered_items(cause_block)
+        else:
+            sentences = split_sentences(analysis)
+            summary = " ".join(sentences[:2])
+            drivers = sentences[2:6]
+
+    immediate = section_between(recommendation, "Immediate actions", ["Long-term solutions", "Priority"])
+    long_term = section_between(recommendation, "Long-term solutions", ["Priority"])
+    priority = section_between(recommendation, "Priority", [])
+
+    if not immediate and not long_term:
+        rec_sentences = split_sentences(recommendation, 5)
+        immediate_items = rec_sentences[:3]
+        long_term_items = rec_sentences[3:]
+    else:
+        immediate_items = numbered_items(immediate)
+        long_term_items = numbered_items(long_term)
+
+    cards = []
+    if summary:
+        body = f"<div class='insight-body'>{escape(summary)}</div>"
+        if closing:
+            body += f"<div class='insight-body' style='margin-top:10px'>{escape(closing)}</div>"
+        cards.append(
+            f"<div class='mini-card root'><div class='mini-card-title'>Root Cause Summary</div>{body}</div>"
+        )
+    if drivers:
+        cards.append(
+            f"<div class='mini-card root'><div class='mini-card-title'>Likely Drivers</div>{list_html(drivers)}</div>"
+        )
+    if immediate_items:
+        cards.append(
+            f"<div class='mini-card action'><div class='mini-card-title'>Immediate Actions</div>{list_html(immediate_items)}</div>"
+        )
+    if long_term_items or priority:
+        priority_html = f"<div class='priority-pill'>{escape(priority)}</div>" if priority else ""
+        cards.append(
+            f"<div class='mini-card priority'><div class='mini-card-title'>Prevention Plan</div>{priority_html}{list_html(long_term_items)}</div>"
+        )
+
+    if cards:
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+
+
+def pattern_name(row):
+    name = row.get("Cluster_Name", "")
+    if pd.notna(name) and str(name).strip():
+        return str(name)
+    return str(row.get("Top_Keywords", "Unnamed pattern"))
+
+
+def pattern_status(row):
+    legacy = int(row.get("Frequency_Legacy", 0))
+    dbb = int(row.get("Frequency_DBB", 0))
+    if legacy == 0 and dbb > 0:
+        return "New in DBB"
+    if legacy > 0 and dbb == 0:
+        return "Eliminated in DBB"
+    if legacy > 0 and dbb > legacy:
+        return "Worse in DBB"
+    if legacy > 0 and dbb > 0:
+        return "Still recurring"
+    return "Insufficient comparison"
+
+
+def pattern_change_text(legacy, dbb):
+    if legacy == 0 and dbb > 0:
+        return "New in DBB"
+    if legacy > 0 and dbb == 0:
+        return "Eliminated"
+    if legacy > 0:
+        return f"{((dbb - legacy) / legacy) * 100:+.0f}%"
+    return "N/A"
+
+
 def save_uploaded_file(uploaded_file):
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     file_path = os.path.join(UPLOADS_DIR, uploaded_file.name)
@@ -95,6 +478,7 @@ def save_uploaded_file(uploaded_file):
 def build_pipeline_command(input_file, mode):
     return [
         sys.executable,
+        "-u",
         os.path.join(PROJECT_ROOT, "run_pipeline.py"),
         input_file,
         "--output_dir",
@@ -265,6 +649,8 @@ except FileNotFoundError as e:
     st.error(f"Data not found: {e}. Run the full pipeline first.")
     st.stop()
 
+inject_dashboard_styles()
+
 # ── Prep ──
 valid_catalog = catalog[catalog["Cluster_ID"] != -1].copy()
 tickets["YearMonth"] = tickets["Created_Date"].dt.to_period("M").astype(str)
@@ -276,6 +662,9 @@ total = len(tickets)
 legacy_n = len(tickets[tickets["System_Type"] == "Legacy"])
 dbb_n = len(tickets[tickets["System_Type"] == "DBB"])
 clusters_n = len(valid_catalog)
+unknown_n = len(tickets[tickets["System_Type"] == "Unknown"])
+both_n = len(tickets[tickets["System_Type"] == "Both"])
+clustered_n = len(tickets[tickets["Cluster_ID"] != -1]) if "Cluster_ID" in tickets.columns else 0
 
 st.sidebar.metric("Total Tickets Mined", f"{total:,}")
 st.sidebar.metric("Legacy Tickets", f"{legacy_n:,}")
@@ -296,6 +685,22 @@ if verdict:
 st.sidebar.divider()
 st.sidebar.caption("Pipeline: classify -> normalize -> vectorize -> cluster -> metrics -> LLM naming -> summary")
 
+st.title("Legacy vs DBB Ticket Pattern Mining")
+st.caption("Use this dashboard to answer three questions: what keeps repeating, whether DBB reduced it, and what should be prevented next.")
+
+overview_cols = st.columns(5)
+overview_cols[0].metric("Tickets Analyzed", f"{total:,}")
+overview_cols[1].metric("Legacy", f"{legacy_n:,}")
+overview_cols[2].metric("DBB", f"{dbb_n:,}")
+overview_cols[3].metric("Recurring Patterns", f"{clusters_n:,}")
+overview_cols[4].metric("Clustered Tickets", f"{clustered_n:,}", f"{format_pct(clustered_n / total) if total else 'N/A'} of all tickets")
+
+if unknown_n or both_n:
+    st.caption(
+        f"Classification note: {unknown_n:,} tickets are Unknown and {both_n:,} tickets touch Both systems. "
+        "Legacy vs DBB charts focus on tickets classified as Legacy or DBB."
+    )
+
 
 # ════════════════════════════════════════════════════════════════
 #  TABS
@@ -315,13 +720,13 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 #  TAB 1 — Migration Timeline
 # ════════════════════════════════════════════════════════════════
 with tab1:
-    st.header("Migration Timeline: Legacy vs DBB Volume Over Time")
-    st.caption("Does DBB reduce ticket volumes? This chart tells the story.")
+    st.header("Did DBB Reduce Ticket Volume?")
+    st.caption("This view compares monthly ticket volume after each ticket is classified as Legacy or DBB. Lower DBB volume is better only when the same business scope is being compared.")
 
     # Executive narrative
     narrative = exec_summary.get("executive_narrative", "")
     if narrative:
-        st.info(narrative)
+        render_executive_narrative(narrative)
 
     # Monthly volume chart
     monthly = (
@@ -338,7 +743,7 @@ with tab1:
         color="System_Type",
         color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
         markers=True,
-        title="Monthly Ticket Volume: Legacy vs DBB",
+        title="Monthly Ticket Volume by System",
     )
     fig.update_layout(
         xaxis_title="Month",
@@ -350,14 +755,15 @@ with tab1:
     st.plotly_chart(fig, use_container_width=True)
 
     # Cumulative view
-    st.subheader("Cumulative Ticket Growth")
+    st.subheader("Cumulative Ticket Load")
+    st.caption("Cumulative view shows total support load over time. A steeper line means tickets are accumulating faster.")
     cum = monthly.copy()
     cum = cum.sort_values("YearMonth")
     cum["Cumulative"] = cum.groupby("System_Type")["Tickets"].cumsum()
     fig2 = px.area(
         cum, x="YearMonth", y="Cumulative", color="System_Type",
         color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
-        title="Cumulative Ticket Growth Over Time",
+        title="Cumulative Tickets Over Time",
     )
     fig2.update_layout(template="plotly_dark")
     st.plotly_chart(fig2, use_container_width=True)
@@ -367,92 +773,87 @@ with tab1:
 #  TAB 2 — Pattern Discovery
 # ════════════════════════════════════════════════════════════════
 with tab2:
-    st.header("AI-Discovered Ticket Patterns")
-    st.caption("Each card represents a cluster of semantically similar tickets identified by our NLP pipeline.")
+    st.header("What Problems Keep Repeating?")
+    st.caption("This page surfaces the most repeated issues. Use Cluster Deep-Dive for timelines, root causes, and sample tickets.")
 
     # Key Findings from LLM
     findings = exec_summary.get("key_findings", [])
     if findings:
         st.subheader("Key Findings")
-        cols = st.columns(min(len(findings), 3))
-        for i, f in enumerate(findings):
-            with cols[i % 3]:
-                impact_color = {"high": "High", "medium": "Medium", "low": "Low"}.get(f.get("impact", ""), "Unknown")
-                st.markdown(f"**{impact_color} {f.get('title', '')}**")
-                st.markdown(f"{f.get('detail', '')}")
+        cards = []
+        tone_map = {"high": "bad", "medium": "warn", "low": "good"}
+        impact_map = {"high": "High Impact", "medium": "Medium Impact", "low": "Positive Signal"}
+        for f in findings:
+            tone = tone_map.get(f.get("impact", ""), "info")
+            impact_text = impact_map.get(f.get("impact", ""), "Insight")
+            cards.append(
+                (
+                    f'<div class="mini-card {("priority" if tone == "warn" else "root" if tone == "info" else "action" if tone == "good" else "priority")}">'
+                    f'<div class="mini-card-title">{escape(f.get("title", "Finding"))}</div>'
+                    f'<div style="margin-bottom:8px"><span class="status-chip {tone}">{escape(impact_text)}</span></div>'
+                    f'<div class="insight-body">{escape(f.get("detail", ""))}</div>'
+                    f'</div>'
+                )
+            )
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
         st.divider()
 
-    # Cluster cards
-    for _, row in valid_catalog.iterrows():
-        cid = row["Cluster_ID"]
-        name = row.get("Cluster_Name", row["Top_Keywords"])
-        persona = row.get("Strategic_Persona", "")
-        analysis = row.get("Analysis", "")
-        rec = row.get("Recommendation", "")
-
-        persona_prefix = f"{persona} - " if pd.notna(persona) and persona else ""
-        with st.expander(f"{persona_prefix}Cluster {cid}: {name}", expanded=False):
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Tickets", int(row["Size"]))
-            c2.metric("Legacy", int(row["Frequency_Legacy"]))
-            c3.metric("DBB", int(row["Frequency_DBB"]))
-
-            # Smart verdict
-            fl, fd = int(row["Frequency_Legacy"]), int(row["Frequency_DBB"])
-            if fl == 0 and fd > 0:
-                c4.metric("Trend", "New in DBB")
-            elif fl > 0 and fd == 0:
-                c4.metric("Trend", "Eliminated")
-            elif fl > 0 and fd > 0:
-                change = ((fd - fl) / fl) * 100
-                c4.metric("Trend", f"{change:+.0f}%", delta=f"{change:+.0f}%", delta_color="inverse")
-            else:
-                c4.metric("Trend", "-")
-
-            if pd.notna(analysis) and analysis:
-                st.markdown(f"**Root Cause:** {analysis}")
-            if pd.notna(rec) and rec:
-                st.success(f"**Recommendation:** {rec}")
-
-            st.markdown(f"*Keywords: {row['Top_Keywords']}*")
-
-            # Domain
-            st.caption(f"Domains: {row['Primary_Domains']}")
-
-            # Per-cluster timeline
-            cluster_tix = tickets[tickets["Cluster_ID"] == cid]
-            if len(cluster_tix) > 5:
-                ct = (
-                    cluster_tix[cluster_tix["System_Type"].isin(["Legacy", "DBB"])]
-                    .groupby(["YearMonth", "System_Type"])
-                    .size()
-                    .reset_index(name="Count")
-                )
-                if not ct.empty:
-                    fig = px.bar(
-                        ct, x="YearMonth", y="Count", color="System_Type",
-                        color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
-                        title=f"Volume Over Time - {name}",
-                        barmode="group",
-                    )
-                    fig.update_layout(template="plotly_dark", height=300)
-                    st.plotly_chart(fig, use_container_width=True)
-
-            # Sample tickets
-            sample = cluster_tix[["Ticket_ID", "System_Type", "System_Subtype", "Short_Description", "Severity", "Reopen_Flag"]].head(5)
-            st.dataframe(sample, hide_index=True)
+    if not valid_catalog.empty:
+        st.subheader("Pattern Summary")
+        pattern_summary = valid_catalog.copy()
+        pattern_summary["Pattern"] = pattern_summary.apply(pattern_name, axis=1)
+        pattern_summary["Status"] = pattern_summary.apply(pattern_status, axis=1)
+        pattern_summary["DBB vs Legacy"] = pattern_summary.apply(
+            lambda r: pattern_change_text(int(r["Frequency_Legacy"]), int(r["Frequency_DBB"])),
+            axis=1,
+        )
+        display_patterns = pattern_summary[
+            [
+                "Pattern", "Status", "Size", "Frequency_Legacy", "Frequency_DBB",
+                "DBB vs Legacy", "AvgTTR_Delta_Hours", "ReopenRate_Delta",
+            ]
+        ].rename(columns={
+            "Size": "Total Tickets",
+            "Frequency_Legacy": "Legacy Tickets",
+            "Frequency_DBB": "DBB Tickets",
+            "AvgTTR_Delta_Hours": "DBB MTTR Difference (Hours)",
+            "ReopenRate_Delta": "DBB Reopen Difference",
+        })
+        st.dataframe(display_patterns.head(12), hide_index=True, use_container_width=True)
+        with st.expander("View full pattern summary", expanded=False):
+            st.dataframe(display_patterns, hide_index=True, use_container_width=True)
+        st.divider()
+        st.subheader("Top Pattern Spotlights")
+        spotlight_cols = [
+            "Cluster_ID", "Cluster_Name", "Size", "Frequency_Legacy", "Frequency_DBB",
+            "Primary_Domains", "Strategic_Persona",
+        ]
+        spotlight_df = pattern_summary.sort_values(["Size", "Frequency_DBB"], ascending=[False, False])[spotlight_cols].head(6)
+        render_cluster_spotlight_cards(spotlight_df)
+        render_section_panel(
+            "Next Step",
+            "Open Cluster Deep-Dive to inspect one pattern in detail, including likely drivers, prevention actions, monthly trend, and sample tickets.",
+            tone="info",
+        )
 
 
 # ════════════════════════════════════════════════════════════════
 #  TAB 3 — Domain & Severity Analysis
 # ════════════════════════════════════════════════════════════════
 with tab3:
-    st.header("Domain & Severity Health Check")
+    st.header("Where Is The Support Load Coming From?")
+    st.caption("This page shows concentration, risk, fix quality, and recurrence across domains.")
+
+    summary_row = st.columns(4)
+    summary_row[0].metric("Domains Tracked", int(tickets["Domain"].nunique()))
+    summary_row[1].metric("Legacy Tickets", f"{legacy_n:,}")
+    summary_row[2].metric("DBB Tickets", f"{dbb_n:,}")
+    summary_row[3].metric("Reopened Tickets", f"{int(tickets['Reopen_Flag'].fillna(False).sum()):,}")
 
     col_a, col_b = st.columns(2)
 
     with col_a:
-        st.subheader("Tickets by Domain")
+        st.subheader("Ticket Volume by Business Domain")
         domain_sys = (
             tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
             .groupby(["Domain", "System_Type"])
@@ -463,33 +864,35 @@ with tab3:
             domain_sys, x="Count", y="Domain", color="System_Type",
             color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
             orientation="h", barmode="group",
-            title="Ticket Volume by Domain: Legacy vs DBB",
+            title="Legacy vs DBB Tickets by Domain",
         )
-        fig.update_layout(template="plotly_dark", height=500)
+        fig.update_layout(template="plotly_dark", height=420)
         st.plotly_chart(fig, use_container_width=True)
 
     with col_b:
-        st.subheader("Severity Distribution")
+        st.subheader("Severity Mix")
         sev = (
             tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
             .groupby(["System_Type", "Severity"])
             .size()
             .reset_index(name="Count")
         )
-        sev["Severity"] = sev["Severity"].map({1: "P1 - Critical", 2: "P2 - High", 3: "P3 - Medium", 4: "P4 - Low"})
+        sev["Severity"] = sev["Severity"].map({1: "Low", 2: "Moderate", 3: "High", 4: "Critical"})
         fig = px.bar(
             sev, x="Severity", y="Count", color="System_Type",
             color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
             barmode="group",
-            title="Severity Breakdown: Legacy vs DBB",
+            title="Ticket Severity by System",
         )
-        fig.update_layout(template="plotly_dark", height=500)
+        fig.update_layout(template="plotly_dark", height=420)
         st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
 
     # Domain health table from LLM
     domain_health = exec_summary.get("domain_health", [])
     if domain_health:
-        st.subheader("Domain Health Scorecard (AI-Generated)")
+        st.subheader("Domain Health Scorecard")
         dh_df = pd.DataFrame(domain_health)
         verdict_map = {
             "improved": "Improved",
@@ -500,103 +903,57 @@ with tab3:
         }
         if "verdict" in dh_df.columns:
             dh_df["verdict"] = dh_df["verdict"].map(lambda v: verdict_map.get(v, v))
-        st.dataframe(dh_df, hide_index=True)
+        verdict_counts = dh_df["verdict"].value_counts().to_dict()
+        summary_parts = [f"{count} {label}" for label, count in verdict_counts.items()]
+        render_section_panel("Domain Readout", " | ".join(summary_parts), tone="info")
+        st.dataframe(dh_df.head(10), hide_index=True, use_container_width=True)
+        if len(dh_df) > 10:
+            with st.expander("View full domain health table", expanded=False):
+                st.dataframe(dh_df, hide_index=True, use_container_width=True)
+
+    risk_col, quality_col = st.columns(2)
 
     # Reopen rates comparison
-    st.subheader("Reopen Rates: Legacy vs DBB")
-    reopen_data = (
-        tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
-        .groupby("System_Type")["Reopen_Flag"]
-        .agg(["sum", "count"])
-        .reset_index()
-    )
-    reopen_data.columns = ["System_Type", "Reopened_Tickets", "Total_Tickets"]
-    reopen_data["Reopen_Rate"] = reopen_data["Reopened_Tickets"] / reopen_data["Total_Tickets"]
-    c1, c2 = st.columns(2)
-    for i, row in reopen_data.iterrows():
-        with [c1, c2][i]:
-            st.metric(
-                f"{row['System_Type']} Reopen Rate",
-                f"{row['Reopen_Rate']:.1%}",
-                f"{int(row['Reopened_Tickets'])} of {int(row['Total_Tickets'])} tickets",
-            )
-
-    st.subheader("Repeat Defect / Reopened Ticket Drilldown")
-    reopened = tickets[
-        tickets["System_Type"].isin(["Legacy", "DBB"])
-        & tickets["Reopen_Flag"].fillna(False)
-    ].copy()
-    if reopened.empty:
-        st.info("No reopened tickets found in the selected dataset.")
-    else:
-        reopened_summary = (
-            reopened.groupby("Cluster_ID")
-            .agg(
-                Reopened_Tickets=("Ticket_ID", "count"),
-                Legacy_Reopened=("System_Type", lambda s: int((s == "Legacy").sum())),
-                DBB_Reopened=("System_Type", lambda s: int((s == "DBB").sum())),
-                Avg_Severity=("Severity", "mean"),
-                Avg_MTTR_Hours=("Time_to_Resolve", "mean"),
-            )
+    with risk_col:
+        st.subheader("Are Fixes Staying Fixed?")
+        reopen_data = (
+            tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
+            .groupby("System_Type")["Reopen_Flag"]
+            .agg(["sum", "count"])
             .reset_index()
         )
-        cluster_sizes = tickets.groupby("Cluster_ID")["Ticket_ID"].count().rename("Cluster_Tickets")
-        reopened_summary = reopened_summary.merge(cluster_sizes, on="Cluster_ID", how="left")
-        reopened_summary["Reopen_Rate"] = reopened_summary["Reopened_Tickets"] / reopened_summary["Cluster_Tickets"]
-        cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
-        keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
-        reopened_summary["Pattern"] = reopened_summary["Cluster_ID"].map(cluster_names).fillna(reopened_summary["Cluster_ID"].map(keyword_names))
-        reopened_summary["Pattern"] = reopened_summary["Pattern"].fillna("Noise / Unclustered")
-        reopened_summary = reopened_summary.sort_values(["Reopened_Tickets", "Reopen_Rate"], ascending=False)
-
-        fig = px.bar(
-            reopened_summary.head(10),
-            x="Reopened_Tickets",
-            y="Pattern",
-            color="DBB_Reopened",
-            orientation="h",
-            title="Top Reopened Patterns",
-            color_continuous_scale="Reds",
-        )
-        fig.update_layout(template="plotly_dark", height=420, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig, use_container_width=True)
-
-        display_reopen = reopened_summary[
-            ["Pattern", "Reopened_Tickets", "Legacy_Reopened", "DBB_Reopened", "Reopen_Rate", "Avg_Severity", "Avg_MTTR_Hours"]
-        ].copy()
-        display_reopen["Reopen_Rate"] = display_reopen["Reopen_Rate"].map(lambda v: f"{v:.1%}")
-        display_reopen["Avg_Severity"] = display_reopen["Avg_Severity"].round(2)
-        display_reopen["Avg_MTTR_Hours"] = display_reopen["Avg_MTTR_Hours"].round(1)
-        st.dataframe(display_reopen.head(15), hide_index=True)
-
-        reopened_cols = [
-            "Ticket_ID", "System_Type", "System_Subtype", "Domain", "OpCo",
-            "Short_Description", "Severity", "Reopen_Count", "Time_to_Resolve",
-        ]
-        reopened_cols = [c for c in reopened_cols if c in reopened.columns]
-        with st.expander("View reopened ticket details", expanded=False):
-            st.dataframe(reopened[reopened_cols].sort_values("Reopen_Count", ascending=False).head(100), hide_index=True)
-
-    st.subheader("Mean Time To Resolve (MTTR)")
-    mttr_data = (
-        tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
-        .groupby("System_Type")["Time_to_Resolve"]
-        .agg(["mean", "median", "count"])
-        .reset_index()
-    )
-    if not mttr_data.empty:
+        reopen_data.columns = ["System_Type", "Reopened_Tickets", "Total_Tickets"]
+        reopen_data["Reopen_Rate"] = reopen_data["Reopened_Tickets"] / reopen_data["Total_Tickets"]
         c1, c2 = st.columns(2)
-        mttr_cols = {"Legacy": c1, "DBB": c2}
-        for _, row in mttr_data.iterrows():
-            col = mttr_cols.get(row["System_Type"])
-            if col is None:
-                continue
-            with col:
+        for i, row in reopen_data.iterrows():
+            with [c1, c2][i]:
                 st.metric(
-                    f"{row['System_Type']} MTTR",
-                    format_hours(row["mean"]),
-                    f"Median {format_hours(row['median'])} across {int(row['count'])} resolved tickets",
+                    f"{row['System_Type']} Reopen Rate",
+                    f"{row['Reopen_Rate']:.1%}",
+                    f"{int(row['Reopened_Tickets'])} reopened",
                 )
+
+    with quality_col:
+        st.subheader("How Long Do Tickets Take To Resolve?")
+        mttr_data = (
+            tickets[tickets["System_Type"].isin(["Legacy", "DBB"])]
+            .groupby("System_Type")["Time_to_Resolve"]
+            .agg(["mean", "median", "count"])
+            .reset_index()
+        )
+        if not mttr_data.empty:
+            c1, c2 = st.columns(2)
+            mttr_cols = {"Legacy": c1, "DBB": c2}
+            for _, row in mttr_data.iterrows():
+                col = mttr_cols.get(row["System_Type"])
+                if col is None:
+                    continue
+                with col:
+                    st.metric(
+                        f"{row['System_Type']} MTTR",
+                        format_hours(row["mean"]),
+                        f"Median {format_hours(row['median'])}",
+                    )
 
     heatmap_data = tickets.pivot_table(
         values="Ticket_ID", index="Domain", columns="System_Type",
@@ -607,69 +964,132 @@ with tab3:
             heatmap_data[["Legacy", "DBB"]],
             text_auto=True,
             color_continuous_scale="RdYlGn_r",
-            title="Ticket Volume Heatmap by Domain",
+            title="Domain Heatmap: Where Legacy and DBB Tickets Concentrate",
             aspect="auto",
         )
-        fig.update_layout(template="plotly_dark", height=500)
+        fig.update_layout(template="plotly_dark", height=420)
         st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Same Failure Patterns Across OpCo / Country")
-    opco_pattern_tickets = tickets[
-        tickets["System_Type"].isin(["Legacy", "DBB"])
-        & (tickets["Cluster_ID"] != -1)
-        & tickets["OpCo"].notna()
-    ].copy()
-    if opco_pattern_tickets.empty:
-        st.info("No clustered OpCo/country data available for this dataset.")
-    else:
-        cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
-        keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
-        opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Cluster_ID"].map(cluster_names).fillna(
-            opco_pattern_tickets["Cluster_ID"].map(keyword_names)
-        )
-        opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Pattern"].fillna(
-            opco_pattern_tickets["Cluster_ID"].map(lambda cid: f"Cluster {cid}")
-        )
-        opco_heatmap = opco_pattern_tickets.pivot_table(
-            values="Ticket_ID",
-            index="Pattern",
-            columns="OpCo",
-            aggfunc="count",
-            fill_value=0,
-        )
-        top_patterns = opco_heatmap.sum(axis=1).sort_values(ascending=False).head(15).index
-        top_opcos = opco_heatmap.sum(axis=0).sort_values(ascending=False).head(12).index
-        opco_heatmap = opco_heatmap.loc[top_patterns, top_opcos]
-        fig = px.imshow(
-            opco_heatmap,
-            text_auto=True,
-            color_continuous_scale="YlOrRd",
-            title="Recurring Pattern Count by OpCo / Country",
-            aspect="auto",
-        )
-        fig.update_layout(template="plotly_dark", height=max(450, 28 * len(opco_heatmap)))
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("Detailed Recurrence Views")
+    detail_tab1, detail_tab2 = st.tabs(["Reopened Patterns", "OpCo / Country Concentration"])
 
-        opco_summary = (
-            opco_pattern_tickets.groupby(["Pattern", "OpCo", "System_Type"])
-            .size()
-            .unstack(fill_value=0)
-            .reset_index()
-        )
-        for col in ["Legacy", "DBB"]:
-            if col not in opco_summary.columns:
-                opco_summary[col] = 0
-        opco_summary["Total"] = opco_summary["Legacy"] + opco_summary["DBB"]
-        opco_summary = opco_summary.sort_values("Total", ascending=False)
-        with st.expander("View OpCo / country recurrence table", expanded=False):
-            st.dataframe(opco_summary[["Pattern", "OpCo", "Legacy", "DBB", "Total"]].head(100), hide_index=True)
+    with detail_tab1:
+        reopened = tickets[
+            tickets["System_Type"].isin(["Legacy", "DBB"])
+            & tickets["Reopen_Flag"].fillna(False)
+        ].copy()
+        if reopened.empty:
+            render_section_panel("No Reopens Found", "No reopened clustered tickets were found in the selected dataset.", tone="good")
+        else:
+            reopened_summary = (
+                reopened.groupby("Cluster_ID")
+                .agg(
+                    Reopened_Tickets=("Ticket_ID", "count"),
+                    Legacy_Reopened=("System_Type", lambda s: int((s == "Legacy").sum())),
+                    DBB_Reopened=("System_Type", lambda s: int((s == "DBB").sum())),
+                    Avg_Severity=("Severity", "mean"),
+                    Avg_MTTR_Hours=("Time_to_Resolve", "mean"),
+                )
+                .reset_index()
+            )
+            cluster_sizes = tickets.groupby("Cluster_ID")["Ticket_ID"].count().rename("Cluster_Tickets")
+            reopened_summary = reopened_summary.merge(cluster_sizes, on="Cluster_ID", how="left")
+            reopened_summary["Reopen_Rate"] = reopened_summary["Reopened_Tickets"] / reopened_summary["Cluster_Tickets"]
+            cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
+            keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
+            reopened_summary["Pattern"] = reopened_summary["Cluster_ID"].map(cluster_names).fillna(reopened_summary["Cluster_ID"].map(keyword_names))
+            reopened_summary["Pattern"] = reopened_summary["Pattern"].fillna("Noise / Unclustered")
+            reopened_summary = reopened_summary.sort_values(["Reopened_Tickets", "Reopen_Rate"], ascending=False)
+
+            fig = px.bar(
+                reopened_summary.head(10),
+                x="Reopened_Tickets",
+                y="Pattern",
+                color="DBB_Reopened",
+                orientation="h",
+                title="Reopened Tickets by Pattern",
+                color_continuous_scale="Reds",
+            )
+            fig.update_layout(template="plotly_dark", height=360, yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, use_container_width=True)
+
+            display_reopen = reopened_summary[
+                ["Pattern", "Reopened_Tickets", "Legacy_Reopened", "DBB_Reopened", "Reopen_Rate", "Avg_Severity", "Avg_MTTR_Hours"]
+            ].copy()
+            display_reopen["Reopen_Rate"] = display_reopen["Reopen_Rate"].map(lambda v: f"{v:.1%}")
+            display_reopen["Avg_Severity"] = display_reopen["Avg_Severity"].round(2)
+            display_reopen["Avg_MTTR_Hours"] = display_reopen["Avg_MTTR_Hours"].round(1)
+            st.dataframe(display_reopen.head(8), hide_index=True, use_container_width=True)
+            with st.expander("View full reopened pattern table", expanded=False):
+                st.dataframe(display_reopen, hide_index=True, use_container_width=True)
+
+    with detail_tab2:
+        opco_pattern_tickets = tickets[
+            tickets["System_Type"].isin(["Legacy", "DBB"])
+            & (tickets["Cluster_ID"] != -1)
+            & tickets["OpCo"].notna()
+        ].copy()
+        if opco_pattern_tickets.empty:
+            render_section_panel("No OpCo Data", "No clustered OpCo or country data is available for this dataset.", tone="warn")
+        else:
+            opco_count = opco_pattern_tickets["OpCo"].nunique()
+            if opco_count <= 1:
+                render_section_panel(
+                    "Single-OpCo Dataset",
+                    "This upload mostly contains one OpCo/country, so this view shows concentration more than cross-country recurrence.",
+                    tone="warn",
+                )
+            cluster_names = valid_catalog.set_index("Cluster_ID")["Cluster_Name"].to_dict() if "Cluster_Name" in valid_catalog.columns else {}
+            keyword_names = valid_catalog.set_index("Cluster_ID")["Top_Keywords"].to_dict() if "Top_Keywords" in valid_catalog.columns else {}
+            opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Cluster_ID"].map(cluster_names).fillna(
+                opco_pattern_tickets["Cluster_ID"].map(keyword_names)
+            )
+            opco_pattern_tickets["Pattern"] = opco_pattern_tickets["Pattern"].fillna(
+                opco_pattern_tickets["Cluster_ID"].map(lambda cid: f"Cluster {cid}")
+            )
+            opco_heatmap = opco_pattern_tickets.pivot_table(
+                values="Ticket_ID",
+                index="Pattern",
+                columns="OpCo",
+                aggfunc="count",
+                fill_value=0,
+            )
+            top_patterns = opco_heatmap.sum(axis=1).sort_values(ascending=False).head(15).index
+            top_opcos = opco_heatmap.sum(axis=0).sort_values(ascending=False).head(12).index
+            opco_heatmap = opco_heatmap.loc[top_patterns, top_opcos]
+            fig = px.imshow(
+                opco_heatmap,
+                text_auto=True,
+                color_continuous_scale="YlOrRd",
+                title="Recurring Pattern Count by OpCo / Country",
+                aspect="auto",
+            )
+            fig.update_layout(template="plotly_dark", height=max(380, 26 * len(opco_heatmap)))
+            st.plotly_chart(fig, use_container_width=True)
+
+            opco_summary = (
+                opco_pattern_tickets.groupby(["Pattern", "OpCo", "System_Type"])
+                .size()
+                .unstack(fill_value=0)
+                .reset_index()
+            )
+            for col in ["Legacy", "DBB"]:
+                if col not in opco_summary.columns:
+                    opco_summary[col] = 0
+            opco_summary["Total"] = opco_summary["Legacy"] + opco_summary["DBB"]
+            opco_summary = opco_summary.sort_values("Total", ascending=False)
+            st.dataframe(opco_summary[["Pattern", "OpCo", "Legacy", "DBB", "Total"]].head(30), hide_index=True, use_container_width=True)
+            if len(opco_summary) > 30:
+                with st.expander("View full OpCo / country recurrence table", expanded=False):
+                    st.dataframe(opco_summary[["Pattern", "OpCo", "Legacy", "DBB", "Total"]], hide_index=True, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════
 #  TAB 4 — Cluster Deep-Dive
 # ════════════════════════════════════════════════════════════════
 with tab4:
-    st.header("Cluster Deep-Dive Explorer")
+    st.header("Pattern Deep-Dive")
+    st.caption("Select one recurring pattern to inspect its volume, Legacy vs DBB behavior, likely cause, prevention action, and example tickets.")
 
     col1, col2 = st.columns([1, 3])
 
@@ -678,7 +1098,7 @@ with tab4:
         # Build readable options
         options = {}
         for _, row in valid_catalog.iterrows():
-            name = row.get("Cluster_Name", row["Top_Keywords"])
+            name = pattern_name(row)
             persona = row.get("Strategic_Persona", "")
             label = f"{name}"
             if pd.notna(persona) and persona:
@@ -689,36 +1109,35 @@ with tab4:
         selected_cid = options[selected_label]
         cluster_info = valid_catalog[valid_catalog["Cluster_ID"] == selected_cid].iloc[0]
 
-        st.metric("Size", int(cluster_info["Size"]))
+        st.metric("Pattern Tickets", int(cluster_info["Size"]))
         st.metric("Legacy Tickets", int(cluster_info["Frequency_Legacy"]))
         st.metric("DBB Tickets", int(cluster_info["Frequency_DBB"]))
+        st.metric("Status", pattern_status(cluster_info))
 
     with col2:
-        name = cluster_info.get("Cluster_Name", cluster_info["Top_Keywords"])
+        name = pattern_name(cluster_info)
         persona = cluster_info.get("Strategic_Persona", "")
 
         if pd.notna(persona) and persona:
             st.markdown(f"### {persona}")
         st.markdown(f"## {name}")
-        st.caption(f"TF-IDF Keywords: {cluster_info['Top_Keywords']}")
-        st.caption(f"Domains: {cluster_info['Primary_Domains']}")
+        st.caption(f"Why grouped: shared keywords include {cluster_info['Top_Keywords']}")
+        st.caption(f"Primary business domains: {cluster_info['Primary_Domains']}")
 
         analysis = cluster_info.get("Analysis", "")
         rec = cluster_info.get("Recommendation", "")
         if pd.notna(analysis) and analysis:
-            st.markdown(f"**Root Cause Analysis:** {analysis}")
-        if pd.notna(rec) and rec:
-            st.info(f"**Prevention Strategy:** {rec}")
+            render_pattern_insight(analysis, rec if pd.notna(rec) else "")
 
         mttr_legacy = cluster_info.get("AvgTTR_Legacy_Hours", float("nan"))
         mttr_dbb = cluster_info.get("AvgTTR_DBB_Hours", float("nan"))
         mttr_delta = cluster_info.get("AvgTTR_Delta_Hours", float("nan"))
 
         mttr_col1, mttr_col2, mttr_col3 = st.columns(3)
-        mttr_col1.metric("Legacy MTTR", format_hours(mttr_legacy))
-        mttr_col2.metric("DBB MTTR", format_hours(mttr_dbb))
+        mttr_col1.metric("Legacy Avg Resolve Time", format_hours(mttr_legacy))
+        mttr_col2.metric("DBB Avg Resolve Time", format_hours(mttr_dbb))
         mttr_col3.metric(
-            "MTTR Delta",
+            "DBB Resolve Difference",
             format_hours(abs(mttr_delta)) if pd.notna(mttr_delta) else "N/A",
             "DBB slower" if pd.notna(mttr_delta) and mttr_delta > 0 else "DBB faster" if pd.notna(mttr_delta) and mttr_delta < 0 else "No comparison",
         )
@@ -737,43 +1156,53 @@ with tab4:
             fig = px.bar(
                 ct, x="YearMonth", y="Count", color="System_Type",
                 color_discrete_map={"Legacy": "#ef4444", "DBB": "#3b82f6"},
-                title=f"Ticket Volume Over Time - {name}",
+                title=f"Monthly Ticket Count for Pattern: {name}",
                 barmode="group",
             )
             fig.update_layout(template="plotly_dark", height=350)
             st.plotly_chart(fig, use_container_width=True)
 
         # Sample tickets
-        st.subheader("Sample Tickets")
+        st.subheader("Example Tickets Inside This Pattern")
         display_cols = ["Ticket_ID", "System_Type", "System_Subtype", "Domain", "Short_Description", "Severity", "Reopen_Flag"]
         display_cols = [c for c in display_cols if c in cluster_tix.columns]
-        st.dataframe(cluster_tix[display_cols].head(15), hide_index=True)
+        st.dataframe(cluster_tix[display_cols].head(8), hide_index=True, use_container_width=True)
+        if len(cluster_tix) > 8:
+            with st.expander("View more example tickets", expanded=False):
+                st.dataframe(cluster_tix[display_cols].head(25), hide_index=True, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════
 #  TAB 5 — Remediation Strategy
 # ════════════════════════════════════════════════════════════════
 with tab5:
-    st.header("Remediation & Volume Reduction Strategy")
-    st.caption("Actionable recommendations to reduce future ticket volumes.")
+    st.header("What Should We Fix First?")
+    st.caption("This page turns recurring patterns into action: prevent repeat tickets, shift work left, create knowledge articles, or automate known fixes.")
 
     # Shift-left opportunities from LLM
     shift_left = exec_summary.get("shift_left_opportunities", [])
     if shift_left:
-        st.subheader("Shift-Left & Automation Opportunities")
+        st.subheader("Shift-Left And Automation Opportunities")
+        st.caption("These are candidates where support effort can move earlier: self-service, monitoring, automation, or clearer L1 knowledge.")
+        cards = []
         for opp in shift_left:
-            with st.container():
-                c1, c2, c3 = st.columns([2, 3, 1])
-                c1.markdown(f"**{opp.get('pattern', '')}**")
-                c2.markdown(opp.get("strategy", ""))
-                c3.metric("Est. Reduction", opp.get("estimated_reduction", "?"))
-            st.divider()
+            cards.append(
+                (
+                    f'<div class="mini-card action">'
+                    f'<div class="mini-card-title">{escape(opp.get("pattern", "Opportunity"))}</div>'
+                    f'<div style="margin-bottom:8px"><span class="status-chip good">Estimated Reduction {escape(str(opp.get("estimated_reduction", "?")))}</span></div>'
+                    f'<div class="insight-body">{escape(opp.get("strategy", ""))}</div>'
+                    f'</div>'
+                )
+            )
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
 
     # Pattern -> Root Cause -> Prevention Map (from cluster catalog)
-    st.subheader("Pattern -> Root Cause -> Prevention Map")
+    st.subheader("Pattern To Root Cause To Prevention")
+    st.caption("Use this as the action backlog: each row connects a repeated issue to a likely cause and a prevention idea.")
     map_data = []
     for _, row in valid_catalog.iterrows():
-        name = row.get("Cluster_Name", row["Top_Keywords"])
+        name = pattern_name(row)
         analysis = row.get("Analysis", "")
         rec = row.get("Recommendation", "")
         persona = row.get("Strategic_Persona", "")
@@ -787,9 +1216,14 @@ with tab5:
                 "DBB Tickets": int(row["Frequency_DBB"]),
             })
     if map_data:
-        st.dataframe(pd.DataFrame(map_data), hide_index=True)
+        map_df = pd.DataFrame(map_data)
+        map_df["Total Tickets"] = map_df["Legacy Tickets"] + map_df["DBB Tickets"]
+        map_df = map_df.sort_values("Total Tickets", ascending=False)
+        st.dataframe(map_df[["Pattern", "Persona", "Legacy Tickets", "DBB Tickets", "Total Tickets"]].head(8), hide_index=True, use_container_width=True)
+        with st.expander("View full root cause and prevention map", expanded=False):
+            st.dataframe(map_df.drop(columns=["Total Tickets"]), hide_index=True, use_container_width=True)
 
-    st.subheader("Legacy Patterns Reappeared in DBB")
+    st.subheader("Legacy Problems That Still Appear In DBB")
     pollutants = valid_catalog[
         (valid_catalog["Frequency_Legacy"] > 0)
         & (valid_catalog["Frequency_DBB"] > 0)
@@ -801,11 +1235,11 @@ with tab5:
             / (pollutants["Frequency_Legacy"] + pollutants["Frequency_DBB"])
         ).round(3)
         pollutants = pollutants.sort_values("Change", ascending=False)
-        st.caption("These are patterns that existed in Legacy and still appeared in DBB. Positive change means DBB has more tickets than Legacy for the same recurring pattern.")
+        st.caption("These patterns existed in Legacy and still appear in DBB. Positive change means DBB has more tickets than Legacy for the same recurring pattern.")
 
         pollution_rows = []
         for _, row in pollutants.iterrows():
-            name = row.get("Cluster_Name", row["Top_Keywords"])
+            name = pattern_name(row)
             change = row["Change"]
             pollution_rows.append({
                 "Pattern": name,
@@ -816,38 +1250,82 @@ with tab5:
                 "Root Cause": row.get("Analysis", ""),
                 "Prevention": row.get("Recommendation", ""),
             })
-            if change > 0:
-                st.error(f"**{name}**: Legacy pattern reappeared worse in DBB. DBB tickets are {change:.0f}% higher than Legacy ({int(row['Frequency_Legacy'])} -> {int(row['Frequency_DBB'])}).")
-            else:
-                st.warning(f"**{name}**: Legacy pattern still reappeared in DBB, but at {abs(change):.0f}% lower volume ({int(row['Frequency_Legacy'])} -> {int(row['Frequency_DBB'])}).")
-
-        st.dataframe(pd.DataFrame(pollution_rows), hide_index=True)
+        pollution_df = pd.DataFrame(pollution_rows)
+        st.dataframe(pollution_df.head(8), hide_index=True, use_container_width=True)
+        if len(pollution_df) > 8:
+            with st.expander("View full carry-forward pattern table", expanded=False):
+                st.dataframe(pollution_df, hide_index=True, use_container_width=True)
+        top_pollutant = pollutants.iloc[0]
+        top_name = pattern_name(top_pollutant)
+        top_change = top_pollutant["Change"]
+        if top_change > 0:
+            render_section_panel(
+                "Top Legacy Pollutant",
+                f"{top_name} is reappearing worse in DBB, with DBB volume {top_change:.0f}% above Legacy.",
+                tone="bad",
+            )
+        else:
+            render_section_panel(
+                "Top Carry-Forward Pattern",
+                f"{top_name} still appears in DBB, but at {abs(top_change):.0f}% lower volume than Legacy.",
+                tone="warn",
+            )
     else:
-        st.success("No clustered Legacy patterns reappeared in DBB for this dataset.")
+        render_section_panel("Positive Signal", "No clustered Legacy patterns reappeared in DBB for this dataset.", tone="good")
 
     # New DBB-only issues
     new_dbb = valid_catalog[valid_catalog["Frequency_Legacy"] == 0]
     if not new_dbb.empty:
-        st.subheader("Issues Introduced by DBB")
-        for _, row in new_dbb.iterrows():
-            name = row.get("Cluster_Name", row["Top_Keywords"])
-            st.warning(f"**{name}**: {int(row['Frequency_DBB'])} tickets - this pattern did not exist in Legacy.")
+        st.subheader("New DBB-Only Patterns")
+        cards = []
+        for _, row in new_dbb.head(6).iterrows():
+            name = pattern_name(row)
+            cards.append(
+                (
+                    f'<div class="mini-card priority">'
+                    f'<div class="mini-card-title">{escape(name)}</div>'
+                    f'<div><span class="status-chip warn">{int(row["Frequency_DBB"])} DBB tickets</span></div>'
+                    f'<div class="insight-body">This recurring pattern did not exist in Legacy within the current clustered data.</div>'
+                    f'</div>'
+                )
+            )
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+        if len(new_dbb) > 6:
+            new_dbb_table = new_dbb.copy()
+            new_dbb_table["Pattern"] = new_dbb_table.apply(pattern_name, axis=1)
+            with st.expander("View all DBB-only patterns", expanded=False):
+                st.dataframe(new_dbb_table[["Pattern", "Frequency_DBB", "Primary_Domains"]], hide_index=True, use_container_width=True)
 
     # Legacy issues eliminated
     eliminated = valid_catalog[valid_catalog["Frequency_DBB"] == 0]
     if not eliminated.empty:
-        st.subheader("Legacy Issues Successfully Eliminated by DBB")
-        for _, row in eliminated.iterrows():
-            name = row.get("Cluster_Name", row["Top_Keywords"])
-            st.success(f"**{name}**: {int(row['Frequency_Legacy'])} Legacy tickets -> 0 in DBB. This problem was solved.")
+        st.subheader("Legacy Patterns Eliminated In DBB")
+        cards = []
+        for _, row in eliminated.head(6).iterrows():
+            name = pattern_name(row)
+            cards.append(
+                (
+                    f'<div class="mini-card action">'
+                    f'<div class="mini-card-title">{escape(name)}</div>'
+                    f'<div><span class="status-chip good">{int(row["Frequency_Legacy"])} Legacy tickets to 0 DBB tickets</span></div>'
+                    f'<div class="insight-body">This is a positive migration signal: the recurring pattern does not appear in DBB.</div>'
+                    f'</div>'
+                )
+            )
+        st.markdown(f"<div class='insight-grid'>{''.join(cards)}</div>", unsafe_allow_html=True)
+        if len(eliminated) > 6:
+            eliminated_table = eliminated.copy()
+            eliminated_table["Pattern"] = eliminated_table.apply(pattern_name, axis=1)
+            with st.expander("View all eliminated legacy patterns", expanded=False):
+                st.dataframe(eliminated_table[["Pattern", "Frequency_Legacy", "Primary_Domains"]], hide_index=True, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════
 #  TAB 6 — Smart Resolution (RAG)
 # ════════════════════════════════════════════════════════════════
 with tab6:
-    st.header("Smart Resolution (RAG)")
-    st.caption("Enter a new ticket description. The system will find similar historical tickets and suggest a resolution based on how they were solved.")
+    st.header("Resolve A New Ticket Using Past Tickets")
+    st.caption("Paste a new ticket description. The system retrieves similar historical tickets and uses their resolution notes to suggest a next action.")
 
     new_ticket_text = st.text_area(
         "New Ticket Description",
@@ -855,7 +1333,7 @@ with tab6:
         placeholder="E.g., User unable to sync data on Glassrun app...",
     )
 
-    if st.button("Get AI Resolution"):
+    if st.button("Suggest Resolution From History"):
         if not new_ticket_text.strip():
             st.warning("Please enter a ticket description.")
         else:
@@ -868,11 +1346,12 @@ with tab6:
                         embedder=embedder,
                     )
 
-                    st.subheader("AI Recommended Resolution")
+                    st.subheader("Suggested Resolution")
                     st.write(recommendation)
 
                     st.divider()
-                    st.subheader("Top Similar Historical Tickets")
+                    st.subheader("Historical Tickets Used As Evidence")
+                    st.caption("Review these tickets to confirm the suggestion before applying it.")
                     display_cols = ["Similarity", "Ticket_ID", "Short_Description", "Resolution_Notes"]
                     avail_cols = [c for c in display_cols if c in similar_tickets.columns]
                     st.dataframe(similar_tickets[avail_cols], hide_index=True)
